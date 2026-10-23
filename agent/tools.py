@@ -26,7 +26,8 @@ def read_file(filepath: str, max_chars: int = 2000) -> str:
         with open(p, 'r', encoding='utf-8') as f:
             content = f.read(max_chars + 1)
             if len(content) > max_chars:
-                return f"O conteúdo do arquivo '{filepath}' foi truncado. O arquivo possui {len(content)} caracteres, mas apenas os primeiros {max_chars} foram exibidos.\n\nInício do conteúdo:\n{content[:max_chars]}...\n\nFim do conteúdo truncado."
+                size = p.stat().st_size
+                return f"O conteúdo do arquivo '{filepath}' foi truncado. O arquivo tem {size} bytes no disco, mas apenas os primeiros {max_chars} caracteres foram exibidos.\n\nInício do conteúdo:\n{content[:max_chars]}...\n\nFim do conteúdo truncado."
         return content
     except UnicodeDecodeError:
         return f"Não foi possível ler o arquivo '{filepath}', provavelmente é um arquivo binário."
@@ -194,7 +195,7 @@ TOOLS_SCHEMA = [
                     "max_chars": {
                         "type": "integer",
                         "description": "O número máximo de caracteres a serem lidos do arquivo. Se o arquivo for maior, o conteúdo será truncado.",
-                        "default": "2000"
+                        "default": 2000
                     }
                 },
                 "required": ["filepath"]

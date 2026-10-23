@@ -3,15 +3,18 @@ from tools import AVAILABLE_TOOLS, TOOLS_SCHEMA
 from ollama_client import get_available_models, send_chat
 import inspect
 
-def select_model():
+def select_model() -> tuple[bool, str]:
   status, models = get_available_models()
   if not status:
-    return models
+    return (False, models)
   print("Modelos disponíveis:")
   for idx, model in enumerate(models):
     print(f"{idx}: {model}")
-  model = models[int(input("Escolha um modelo:"))]
-  return model
+  while True:
+    choice = input("Escolha um modelo: ").strip()
+    if choice.isdigit() and int(choice) < len(models):
+      return (True, models[int(choice)])
+    print(f"Opção inválida. Digite um número de 0 a {len(models) - 1}.")
 
 
 def chat_turn(messages: list, model: str, max_turns: int = 10) -> str:
@@ -77,10 +80,10 @@ if __name__ == "__main__":
   )
 
 
-  model = select_model()
-  if not model[0]:
-    print(model[1])
-    exit()
+  ok, model = select_model()
+  if not ok:
+    print(f"Erro: {model}")
+    exit(1)
   
   while True:
     prompt = input("Você: ")

@@ -21,7 +21,9 @@ def get_available_models(base_url: str = "http://localhost:11434", require_tools
 
     return (True, models)
 
-def send_chat(model: str, messages: list, tools: list | None = None, base_url: str = "http://localhost:11434") -> tuple[bool, dict | str]:
+def send_chat(model: str, messages: list, tools: list | None = None, base_url: str = "http://localhost:11434", timeout: tuple[float, float] = (5, 300)) -> tuple[bool, dict | str]:
+    # timeout = (conectar, ler): 5 s para abrir a conexão TCP; 300 s para a resposta,
+    # que inclui carregar o modelo na VRAM na primeira chamada.
     payload = {
         "model": model,
         "messages": messages,
@@ -30,7 +32,9 @@ def send_chat(model: str, messages: list, tools: list | None = None, base_url: s
     if tools:
         payload["tools"] = tools
     try:
-        response = requests.post(f"{base_url}/api/chat", json=payload, stream=False)
+        response = requests.post(f"{base_url}/api/chat", json=payload, stream=False, timeout=timeout)
+    except requests.exceptions.Timeout:
+        return (False, f"Ollama não respondeu dentro do limite de {timeout[1]:.0f} s (modelo travado ou ainda carregando)")
     except requests.exceptions.ConnectionError:
         return (False, "Ollama não está acessível na porta 11434")
     
