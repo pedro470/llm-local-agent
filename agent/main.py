@@ -1,6 +1,7 @@
 from pathlib import Path
 from tools import AVAILABLE_TOOLS, TOOLS_SCHEMA
 from ollama_client import get_available_models, send_chat
+from guard import describe_roots
 import inspect
 
 def select_model() -> tuple[bool, str]:
@@ -70,7 +71,8 @@ if __name__ == "__main__":
           "3. Quando o usuário solicitar explicitamente alguma inspeção ou ação real no sistema operacional, aja em etapas usando as ferramentas disponíveis para chegar ao resultado final.\n"
           "4. Quando o resultado final for ambíguo ou necessitar de ferramentas destrutivas, comunique ao usuário o que você entendeu e aguarde a confirmação.\n"
           "5. Ao receber o retorno de uma ferramenta, SEMPRE apresente e resuma os dados obtidos na sua resposta final ao usuário.\n"
-          "6. Ao referenciar pastas locais, prefira sempre caminhos relativos ao diretório de trabalho atual (ex: '.', 'agent')."
+          "6. Ao referenciar pastas locais, prefira sempre caminhos relativos ao diretório de trabalho atual (ex: '.', 'agent').\n"
+          f"7. LIMITES DAS FERRAMENTAS: {describe_roots()} Se uma ferramenta recusar um caminho ou comando, explique o limite ao usuário em vez de tentar contornar."
       ),
   }]
 

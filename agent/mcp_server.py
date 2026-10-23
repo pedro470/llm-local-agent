@@ -9,6 +9,8 @@ Blindagem de Segurança (Defense-in-Depth):
    Se não houver terminal interativo (/dev/tty indisponível), opera em Fail-Closed (bloqueia).
 3. Soft-Delete (Quarentena): arquivos "deletados" são movidos para a pasta .trash/ com timestamp,
    nunca destruídos permanentemente via unlink().
+4. Cerca (guard.py): caminhos só dentro das raízes permitidas e run_command só com programas
+   da lista, executados sem shell. A recusa vem antes da pergunta ao humano.
 """
 
 from datetime import datetime
@@ -16,6 +18,7 @@ from pathlib import Path
 import shutil
 import subprocess
 from mcp.server.mcpserver import MCPServer
+from guard import check_path, check_command
 
 # Inicializa o servidor MCP
 mcp = MCPServer("LocalFilesystem")
@@ -64,7 +67,9 @@ def _ask_tty_confirmation(action_description: str) -> tuple[bool, str]:
 def list_files(directory: str = ".") -> str:
     """Lista os arquivos e subpastas de um diretório especificado, indicando se cada item é DIR ou FILE."""
     try:
-        p = Path(directory).expanduser().resolve()
+        allowed, p = check_path(directory)
+        if not allowed:
+            return p
         is_valid, msg = _validate_path(p, is_dir=True)
         if not is_valid:
             return msg
@@ -81,7 +86,9 @@ def list_files(directory: str = ".") -> str:
 def read_file(filepath: str, max_chars: int = 2000) -> str:
     """Lê o conteúdo textual de um arquivo até o limite de caracteres especificado."""
     try:
-        p = Path(filepath).expanduser().resolve()
+        allowed, p = check_path(filepath)
+        if not allowed:
+            return p
         is_valid, msg = _validate_path(p, is_file=True)
         if not is_valid:
             return msg
@@ -103,7 +110,9 @@ def read_file(filepath: str, max_chars: int = 2000) -> str:
 def create_directory(directory_path: str) -> str:
     """Cria um novo diretório (e diretórios pais intermediários se necessário)."""
     try:
-        p = Path(directory_path).expanduser().resolve()
+        allowed, p = check_path(directory_path, write=True)
+        if not allowed:
+            return p
         if p.is_file():
             return f"Erro: '{directory_path}' já existe e é um arquivo."
         if p.is_dir():
@@ -118,8 +127,12 @@ def create_directory(directory_path: str) -> str:
 def move_file(source_path: str, dest_path: str) -> str:
     """Move um arquivo da origem para o diretório de destino."""
     try:
-        src = Path(source_path).expanduser().resolve()
-        dst = Path(dest_path).expanduser().resolve()
+        allowed, src = check_path(source_path, write=True)
+        if not allowed:
+            return src
+        allowed, dst = check_path(dest_path, write=True)
+        if not allowed:
+            return dst
 
         if not src.is_file():
             return f"Erro: Origem '{source_path}' não existe ou não é um arquivo."
@@ -140,8 +153,12 @@ def move_file(source_path: str, dest_path: str) -> str:
 def copy_file(source_path: str, dest_path: str) -> str:
     """Copia um arquivo da origem para o diretório de destino preservando metadados."""
     try:
-        src = Path(source_path).expanduser().resolve()
-        dst = Path(dest_path).expanduser().resolve()
+        allowed, src = check_path(source_path)
+        if not allowed:
+            return src
+        allowed, dst = check_path(dest_path, write=True)
+        if not allowed:
+            return dst
 
         if not src.is_file():
             return f"Erro: Origem '{source_path}' não existe ou não é um arquivo."
@@ -162,7 +179,9 @@ def copy_file(source_path: str, dest_path: str) -> str:
 def delete_file(source_path: str) -> str:
     """Remove um arquivo movendo-o para a quarentena (.trash) após confirmação humana obrigatória no terminal."""
     try:
-        p = Path(source_path).expanduser().resolve()
+        allowed, p = check_path(source_path, write=True)
+        if not allowed:
+            return p
         if not p.is_file():
             return f"Erro: '{source_path}' não existe ou não é um arquivo."
 
@@ -189,24 +208,24 @@ def delete_file(source_path: str) -> str:
 
 @mcp.tool()
 def run_command(command: str) -> str:
-    """Executa um comando bash no ambiente Linux WSL2 com timeout de 30s após confirmação humana obrigatória."""
+    """Executa um comando de leitura ou diagnóstico no Linux WSL2, sem shell, com timeout de 30s após confirmação humana obrigatória. Programas permitidos: ls, pwd, cat, head, tail, wc, du, df, stat, file, grep, uname, whoami, date, uptime, free, ps, which."""
     try:
-        # 1. Filtro estático de comandos catastróficos
-        prohibited = ["rm -rf /", "mkfs", "dd if=", ":(){ :|:& };:"]
-        if any(p in command for p in prohibited):
-            return f"🛑 Comando '{command}' bloqueado permanentemente por política de segurança."
+        # 1. Lista de programas permitidos + caminhos dentro das raízes (guard.py)
+        allowed, argv = check_command(command)
+        if not allowed:
+            return argv
 
         # 2. Trava física no terminal (/dev/tty) - O LLM NÃO tem como contornar
         authorized, reason = _ask_tty_confirmation(
-            f"O agente solicitou EXECUTAR O COMANDO BASH: `{command}`"
+            f"O agente solicitou EXECUTAR O COMANDO: `{command}`"
         )
         if not authorized:
             return f"🛑 {reason}"
 
+        # shell=False: argv vai direto para execve(); não há bash para interpretar | > ; $()
         result = subprocess.run(
-            command,
-            shell=True,
-            executable="/bin/bash",
+            argv,
+            shell=False,
             capture_output=True,
             text=True,
             timeout=30,

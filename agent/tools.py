@@ -2,6 +2,7 @@ from datetime import datetime
 import subprocess
 from pathlib import Path
 import shutil
+from guard import check_path, check_command
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TRASH_DIR = PROJECT_ROOT / ".trash"
@@ -19,7 +20,9 @@ def validade_path(path: Path, is_dir: bool = False, is_file: bool = False):
 
 def read_file(filepath: str, max_chars: int = 2000) -> str:
     try:
-        p = Path(filepath)
+        allowed, p = check_path(filepath)
+        if not allowed:
+            return p
         is_valid, message = validade_path(p, is_file=True)
         if not is_valid:
             return message
@@ -39,7 +42,9 @@ def read_file(filepath: str, max_chars: int = 2000) -> str:
 def list_files(directory: str) -> str:
     """Lista os arquivos e diretórios do caminho especificado"""
     try:
-        p = Path(directory)
+        allowed, p = check_path(directory)
+        if not allowed:
+            return p
         is_valid, message = validade_path(p, is_dir=True)
         if not is_valid:
             return message
@@ -55,7 +60,9 @@ def list_files(directory: str) -> str:
 
 def create_directory(directory_path: str) -> str:
     try:
-        p = Path(directory_path)
+        allowed, p = check_path(directory_path, write=True)
+        if not allowed:
+            return p
         if p.is_file():
             return f"Erro: '{directory_path}' já existe e é um arquivo."
         if p.is_dir():
@@ -68,8 +75,13 @@ def create_directory(directory_path: str) -> str:
 
 def move_file(source_path: str, dest_path: str) -> str:
     try:
-        src_path = Path(source_path)
-        dst_path = Path(dest_path)
+        # Mover tira o arquivo da origem: origem e destino precisam estar em raiz de escrita.
+        allowed, src_path = check_path(source_path, write=True)
+        if not allowed:
+            return src_path
+        allowed, dst_path = check_path(dest_path, write=True)
+        if not allowed:
+            return dst_path
 
         if not src_path.is_file():
             return f"Erro: Origem '{source_path}' não existe ou não é um arquivo."
@@ -90,8 +102,13 @@ def move_file(source_path: str, dest_path: str) -> str:
 
 def copy_file(source_path: str, dest_path: str) -> str:
     try:
-        src_path = Path(source_path)
-        dst_path = Path(dest_path)
+        # Copiar só lê a origem; o destino recebe um arquivo novo e precisa ser raiz de escrita.
+        allowed, src_path = check_path(source_path)
+        if not allowed:
+            return src_path
+        allowed, dst_path = check_path(dest_path, write=True)
+        if not allowed:
+            return dst_path
 
         if not src_path.is_file():
             return f"Erro: Origem '{source_path}' não existe ou não é um arquivo."
@@ -111,7 +128,9 @@ def copy_file(source_path: str, dest_path: str) -> str:
 
 def delete_file(source_path: str) -> str:
     try:
-        p = Path(source_path).expanduser().resolve()
+        allowed, p = check_path(source_path, write=True)
+        if not allowed:
+            return p
         if not p.is_file():
             return f"Erro: Origem '{source_path}' não existe ou não é um arquivo."
 
@@ -129,16 +148,20 @@ def delete_file(source_path: str) -> str:
 
 def run_command(command: str) -> str:
     try:
+        allowed, argv = check_command(command)
+        if not allowed:
+            return argv
+
         authorizarion = input(f"⚠️ [SEGURANÇA] O agente solicitou executar o comando '{command}'. Confirma executar? (s/n): ")
         if authorizarion.lower() != 's':
             return f"Comando '{command}' cancelado pelo usuário."
-        
+
+        # shell=False: argv vai direto para execve(); não há bash para interpretar | > ; $()
         result = subprocess.run(
-            command, 
-            shell=True,
-            executable="/bin/bash", 
-            capture_output=True, 
-            text=True, 
+            argv,
+            shell=False,
+            capture_output=True,
+            text=True,
             timeout=30
             )
         if result.returncode != 0:
@@ -282,7 +305,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "run_command",
-            "description": "Executa um comando no terminal Linux (WSL2).",
+            "description": "Executa um comando de leitura ou diagnóstico no Linux (WSL2), sem shell: pipe, redirecionamento e ';' não funcionam. Programas permitidos: ls, pwd, cat, head, tail, wc, du, df, stat, file, grep, uname, whoami, date, uptime, free, ps, which.",
             "parameters": {
                 "type": "object",
                 "properties": {
