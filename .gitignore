@@ -1,0 +1,21 @@
+# Ambiente virtual (Linux, criado no WSL; recrie com: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt)
+.venv/
+
+# Bytecode gerado pelo interpretador
+__pycache__/
+*.pyc
+
+# Quarentena do delete_file (arquivos "apagados" pelo agente)
+.trash/
+
+# Logs e capturas de terminal
+logs/
+*.log
+(.venv)*.txt
+
+# Pastas de teste do agente (conteúdo descartável)
+teste_dir/
+teste_sandbox/
+
+# Configuração local do editor
+.vscode/
