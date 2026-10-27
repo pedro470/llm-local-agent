@@ -49,14 +49,13 @@ Disco: leitura no projeto inteiro; escrita só em teste_sandbox/ (ou em AGENT_WR
 | **Driver GPU**  | ROCm 10.x                     | Interface entre o SO Linux e a GPU AMD       |
 | **Container**   | Docker no WSL2 (Ubuntu)        | Isola o ambiente Linux com ROCm + Ollama     |
 | **Servidor LLM**| Ollama                        | Serve o modelo, expõe API REST na porta 11434|
-| **Modelo**      | **A decidir** (ver abaixo)     | LLM com function-calling nativo              |
+| **Modelo**      | **gemma4:12b** (Q4_K_M)        | 11,9B parâmetros, 7,0 GB; 7,8 GB na VRAM     |
 | **Agente**      | Python 3.12 + SDK `mcp` 2.3.0  | main.py (cliente) + mcp_server.py (stdio)    |
 
-### Modelo: decisão pendente
+### Modelo oficial: gemma4:12b (decidido em 27/10/2026)
 
-O projeto nasceu com o Llama 3.1 8B Instruct Q4_K_M, mas o código e os testes já usaram outros.
-A bateria `evals/prompt_traps.py` (6 casos-armadilha × 3 rodadas, conferindo chamadas e texto)
-dá o critério objetivo:
+O projeto nasceu com o Llama 3.1 8B Instruct Q4_K_M. A troca foi decidida pela bateria
+`evals/prompt_traps.py` (6 casos-armadilha × 3 rodadas, conferindo chamadas e texto):
 
 | Modelo        | Arquivo | Bateria (caminho MCP) | Observação |
 |---------------|---------|-----------------------|------------|
@@ -64,7 +63,11 @@ dá o critério objetivo:
 | `gemma4:12b`  | 7,0 GB  | 18/18                 | Ocupa 7,8 GB na VRAM com contexto de 4096; carrega em ~7 s a frio |
 | `qwen38-27b`  | 12,2 GB | não medido            | Cabe nos 15,8 GiB, mas sobra pouco para o contexto |
 
-Escolhido o modelo, atualize esta seção, o AGENTS.md e o TODO.md.
+O gemma4:12b foi o único sem falha, inclusive no caso de injeção (instrução escondida num
+arquivo), em que o llama3.1:8b caiu nas 3 rodadas. O custo é mais VRAM (7,8 GB contra ~5 GB) e
+~7 s para carregar a frio, que o `main.py` esconde aquecendo o modelo na subida.
+No código, o modelo oficial fica em `OFFICIAL_MODEL` (`agent/ollama_client.py`): o `main.py` o marca
+como "(oficial)" e o escolhe com Enter, e a bateria o usa como padrão.
 
 ---
 
@@ -100,7 +103,7 @@ O código está versionado em https://github.com/pedro470/llm-local-agent (priva
   velocidade despenca.
 - Medido na Fase 3: llama3.1:8b a 84,45 tokens/s de geração, 100% na VRAM.
 - O 8B foi a aposta inicial ("com bom prompting é suficiente"), mas a bateria de armadilhas mostrou
-  limites dele em segurança e fidelidade; ver "Modelo: decisão pendente".
+  limites dele em segurança e fidelidade; o oficial passou a ser o gemma4:12b (ver acima).
 
 ### Por que quantização Q4_K_M?
 - Ocupa ~4.9GB (vs ~16GB em FP16)
@@ -195,8 +198,8 @@ Se você esquecer de onde veio um arquivo ou onde ele deve ser montado, não cop
 | **Total estimado**                    | **~50-60 GB** |
 
 > Os modelos são o que mais cresce: o volume tem llama3.1:8b (4,6 GB), gemma4:12b (7,0 GB),
-> qwen38-27b (12,2 GB) e uma variante do gemma (6,5 GB). Depois de escolher o modelo oficial,
-> `docker exec ollama ollama rm <modelo>` libera os que sobrarem.
+> qwen38-27b (12,2 GB) e uma variante do gemma (6,5 GB). Com o gemma4:12b como oficial,
+> `docker exec ollama ollama rm <modelo>` libera os outros, se não forem mais usados para comparação.
 
 ---
 

@@ -2,6 +2,9 @@ import time
 
 import requests
 
+# Modelo oficial do projeto (decisão de 27/10/2026, pela bateria evals/prompt_traps.py: 18/18).
+OFFICIAL_MODEL = "gemma4:12b"
+
 
 def get_available_models(base_url: str = "http://localhost:11434", require_tools: bool = True) -> tuple[bool, list[str] | str]:
     try:
@@ -67,4 +70,4 @@ def send_chat(model: str, messages: list, tools: list | None = None, base_url: s
 
 if __name__ == "__main__":
     print(get_available_models())
-    print(send_chat("qwen3.5:9b", [{"role": "user", "content": "Olá!"}]))
+    print(send_chat(OFFICIAL_MODEL, [{"role": "user", "content": "Olá!"}]))

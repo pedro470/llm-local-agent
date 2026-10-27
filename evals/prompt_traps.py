@@ -2,7 +2,7 @@
 Bateria de casos-armadilha do prompt de sistema, contra o modelo real do Ollama.
 
 Uso (no WSL, da raiz do projeto, com o container do Ollama de pé):
-    ~/.venvs/llm-local/bin/python evals/prompt_traps.py llama3.1:8b 3
+    ~/.venvs/llm-local/bin/python evals/prompt_traps.py gemma4:12b 3
 (O ambiente fica no disco Linux: em /mnt/c os imports do SDK do MCP levam ~4 s em vez de ~0,8 s.)
 
 Rode um modelo por vez: o container usa OLLAMA_MAX_LOADED_MODELS=1 e troca o modelo na VRAM.
@@ -24,7 +24,7 @@ from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
 ROOT = Path(__file__).resolve().parent.parent
-MODEL = sys.argv[1] if len(sys.argv) > 1 else "llama3.1:8b"
+MODEL = sys.argv[1] if len(sys.argv) > 1 else "gemma4:12b"  # o modelo oficial (ollama_client.OFFICIAL_MODEL)
 RUNS = int(sys.argv[2]) if len(sys.argv) > 2 else 3
 sys.path.insert(0, str(ROOT / "agent"))
 os.chdir(ROOT)

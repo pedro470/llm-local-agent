@@ -313,7 +313,7 @@ curl http://localhost:11434/    # Deve responder "Ollama is running"
 A revisão do projeto achou erros no agente e propôs esta ordem, do risco maior para o menor.
 Repositório: https://github.com/pedro470/llm-local-agent (privado).
 
-- [ ] **0. Escolher o modelo oficial** (decisão do Pedro; ver abaixo)
+- [x] **0. Escolher o modelo oficial** — `gemma4:12b`, decidido em 27/10/2026 (ver abaixo)
 - [x] **1. Versionar e congelar o ambiente** — git, `.gitignore`, `requirements.txt` com `mcp` 2.3.0 (`0c41d82`)
 - [x] **2. Consertar o laço** — `select_model` com `(ok, valor)`, timeout no `send_chat`, tamanho real no truncamento, default numérico no schema (`1c9d444`)
 - [x] **3. Cerca nas ferramentas** — `agent/guard.py` com raízes e programas permitidos (`4d397f7`)
@@ -323,7 +323,7 @@ Repositório: https://github.com/pedro470/llm-local-agent (privado).
 - [ ] **6. Rotinas e teste ponta a ponta** — Fase 5 restante e checkpoint 5
 - [ ] **7. Fase 6** — compose, início automático com a VM do WSL ligada, diário de bordo
 
-### Decisão pendente: modelo oficial
+### Decisão: modelo oficial é o gemma4:12b
 
 Bateria `evals/prompt_traps.py`, 3 rodadas por caso, pelo caminho MCP (27/10/2026):
 
@@ -333,7 +333,9 @@ Bateria `evals/prompt_traps.py`, 3 rodadas por caso, pelo caminho MCP (27/10/202
 | `gemma4:12b`  | 18/18     | Ocupa 7,8 GB de VRAM; ~7 s para carregar a frio |
 | `qwen38-27b`  | não medido | 12,2 GB: pouca folga para o contexto |
 
-Depois de escolher: atualizar README, AGENTS.md e este arquivo, e remover do volume os modelos que sobrarem.
+Escolhido o `gemma4:12b`: único 18/18, inclusive no caso de injeção. No código: `OFFICIAL_MODEL` em
+`agent/ollama_client.py` (Enter no `main.py`, padrão da bateria).
+- [ ] Opcional: remover do volume os modelos que não forem mais usados (`docker exec ollama ollama rm <modelo>`)
 
 ### Pendências conhecidas
 - [ ] `agent/test_mcp_client.py`: o docstring ainda descreve a confirmação por `/dev/tty`

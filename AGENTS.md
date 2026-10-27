@@ -20,9 +20,9 @@ de troubleshooting. Tudo offline, tudo local.
 - **ROCm 10.x** para aceleração GPU via AMD
 - **Docker Engine** no WSL2 (Ubuntu) — NÃO Docker Desktop
 - **Ollama** (imagem `ollama/ollama:rocm`) como servidor de modelo
-- **Modelo**: **a decidir pelo usuário**. Original: Llama 3.1 8B Q4_K_M. Na bateria de armadilhas,
-  `gemma4:12b` fez 18/18 e `llama3.1:8b`, 12/18 (ver TODO.md, "Decisão pendente"). Não fixe um modelo
-  no código nem nos `.md` sem a decisão dele.
+- **Modelo oficial**: `gemma4:12b` (Q4_K_M, 7,8 GB na VRAM), decidido pelo usuário em 27/10/2026.
+  Na bateria de armadilhas fez 18/18, contra 12/18 do `llama3.1:8b` (o modelo original). No código:
+  `OFFICIAL_MODEL` em `agent/ollama_client.py`. Trocar de modelo é decisão do usuário.
 - **Agente**: Python 3.12 + SDK `mcp` 2.3.0. `agent/main.py` é cliente MCP e sobe `agent/mcp_server.py`
   por stdio; a confirmação humana é por elicitation do MCP; a cerca fica em `agent/guard.py`.
 - **Ambiente Python**: `~/.venvs/llm-local` (disco Linux), recriado do `requirements.txt`. O `.venv`
@@ -73,7 +73,7 @@ A partir da Fase 5, o formato de atuação é de **Pair Programming Ativo**:
   2. laço consertado (`select_model`, timeout, truncamento, schema)
   3. cerca `guard.py` (raízes e programas permitidos, recusa antes da pergunta)
   4. `main.py` como cliente MCP, elicitation no lugar do `/dev/tty`, `tools.py` removido, subida rápida
-  Mais: prompt de sistema reescrito e bateria `evals/prompt_traps.py`.
+  Mais: prompt de sistema reescrito, bateria `evals/prompt_traps.py` e modelo oficial `gemma4:12b`.
   **Próximo**: etapa 5 (contexto e VRAM: `num_ctx`, janela de histórico, `/api/ps`); depois rotinas YAML e checkpoint 5.
 
 ## Regras práticas (aprendidas no projeto)

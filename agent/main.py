@@ -16,7 +16,7 @@ import json
 import sys
 from pathlib import Path
 
-from ollama_client import get_available_models, send_chat, warm_up
+from ollama_client import OFFICIAL_MODEL, get_available_models, send_chat, warm_up
 from system_prompt import build_system_prompt
 
 # O SDK do MCP (pydantic, starlette, uvicorn, cryptography...) leva ~0,8 s para importar no
@@ -30,11 +30,15 @@ def select_model() -> tuple[bool, str]:
   status, models = get_available_models()
   if not status:
     return (False, models)
+  official = next((m for m in models if m.split(":latest")[0] == OFFICIAL_MODEL), None)
   print("Modelos disponíveis:")
   for idx, model in enumerate(models):
-    print(f"{idx}: {model}")
+    print(f"{idx}: {model}{'  (oficial)' if model == official else ''}")
   while True:
-    choice = input("Escolha um modelo: ").strip()
+    hint = f" [Enter = {official}]" if official else ""
+    choice = input(f"Escolha um modelo{hint}: ").strip()
+    if not choice and official:
+      return (True, official)
     if choice.isdigit() and int(choice) < len(models):
       return (True, models[int(choice)])
     print(f"Opção inválida. Digite um número de 0 a {len(models) - 1}.")
