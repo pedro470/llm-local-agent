@@ -180,6 +180,7 @@ docker run --rm \
 - [x] **Criar ambiente virtual do projeto**
   - Navegado até a raiz do projeto em `/mnt/c/Users/plepl/Downloads/01-Trabalho/LLMs`
   - Criado `.venv` via `python3 -m venv .venv` e ativado com `source .venv/bin/activate`
+    (substituído em 27/10 por `~/.venvs/llm-local`, no disco Linux: em `/mnt/c` os imports eram ~5x mais lentos)
   - Conceito validado: `$PATH` priorizado, isolamento de `site-packages` e link simbólico para `/usr/bin/python3`
 
 - [x] **Instalar dependências básicas**
@@ -189,6 +190,7 @@ docker run --rm \
 - [x] **Criar um script de teste simples**
   - Implementado `agent/test_connection.py` com health check inicial e inferência síncrona (`stream: False`)
   - Validada resposta em português e latência de geração (~97 tokens/s na RX 9070 XT)
+  - Hoje o `test_connection.py` só lista os modelos com suporte a ferramentas (sem inferência)
 
 - [x] **Projetar as MCP Tools iniciais**
   - Mapeadas operações essenciais de sistema de arquivos e execução
@@ -203,20 +205,20 @@ docker run --rm \
 
 - [x] **Expandir as Ferramentas em `agent/tools.py` e Integrar no Agente**
   - [x] `read_file(filepath, max_chars)` com trava de tamanho e detecção de binários
-  - [x] `create_folder(path)`
+  - [x] `create_directory(directory_path)` (o nome real; o rascunho dizia `create_folder`)
   - [x] `move_file(src, dst)` e `copy_file(src, dst)`
   - [x] `delete_file(path)` com confirmação explícita no terminal (HITL)
-  - [x] `run_command(cmd)` com restrições e timeout
+  - [x] `run_command(cmd)` com timeout (as restrições de verdade só vieram na etapa 3 do roteiro abaixo)
 
 ### 🏁 CHECKPOINT FASE 4 CONCLUÍDO
 - [x] Conexão e inferência direta validadas (`agent/test_connection.py`)
 - [x] CLI interativo com function calling multi-turnos e auto-cura (`agent/main.py`)
-- [x] Ferramentas de sistema de arquivos e subprocessos blindadas e testadas com HITL (`agent/tools.py`)
+- [x] Ferramentas de sistema de arquivos e subprocessos com HITL (`agent/tools.py`, removido na etapa 4: as ferramentas agora vivem só no `mcp_server.py`)
 
 - Dividas técnicas a serem satisfeitas:
     - [ ] Inspecionar a VRAM: GET /api/ps devolve exatamente quais modelos estão ocupando a memória de vídeo agora.
-    - [ ] Ejetar modelo ativo: POST /api/generate com {"model": "modelo_anterior", "keep_alive": 0} libera a VRAM instantaneamente.
-    - [ ] Warm-up imediato: POST /api/generate com {"model": "modelo_escolhido"} (sem prompt) força o Ollama a subir tudo para a GPU antes de liberar o prompt "Você: " para o usuário.
+    - [ ] Ejetar modelo ativo: POST /api/generate com {"model": "modelo_anterior", "keep_alive": 0} libera a VRAM instantaneamente. (Na prática o container já usa `OLLAMA_MAX_LOADED_MODELS=1`, que descarrega o anterior sozinho.)
+    - [x] Warm-up imediato: `warm_up()` em `ollama_client.py`; o `main.py` carrega o modelo em paralelo com a subida do servidor MCP (com o modelo na VRAM, o "Você:" aparece em 1,6 s).
 
 
 
@@ -229,8 +231,22 @@ docker run --rm \
   - 7 ferramentas registradas via decorators (`list_files`, `read_file`, `create_directory`, `move_file`, `copy_file`, `delete_file`, `run_command`)
   - Validado cliente assíncrono em `agent/test_mcp_client.py` com handshake, listagem de tools e execução remota via IPC
 
+- [x] **Cerca de segurança** (`agent/guard.py`, etapa 3 do roteiro)
+  - Raízes permitidas: leitura no projeto, escrita só em `teste_sandbox/` (trocar com `AGENT_WRITE_ROOTS`)
+  - `run_command` só com 18 programas de leitura, executados sem shell
+  - A recusa vem antes da pergunta ao humano
+
+- [x] **Agente como cliente MCP** (etapa 4 do roteiro)
+  - `main.py` sobe o `mcp_server.py` por stdio e usa `tools/list` + `call_tool`; `tools.py` removido
+  - Confirmação humana por elicitation do MCP (o `/dev/tty` não existe no processo filho: o SDK usa `start_new_session=True`)
+
+- [x] **Prompt de sistema revisado + bateria de armadilhas**
+  - `agent/system_prompt.py` e `evals/prompt_traps.py` (6 casos, conferindo chamadas e texto)
+
 - [ ] **Implementar rotinas pré-definidas**
   - Crie um diretório `routines/` com arquivos YAML ou JSON descrevendo rotinas
+  - Use os nomes reais das ferramentas e caminhos dentro das raízes de escrita: para mexer em
+    `~/Downloads`, inclua a pasta em `AGENT_WRITE_ROOTS` antes
   - Exemplo de rotina:
     ```yaml
     name: "limpar-downloads"
@@ -238,7 +254,7 @@ docker run --rm \
     steps:
       - action: list_files
         path: "~/Downloads"
-      - action: create_folder
+      - action: create_directory
         path: "~/Downloads/Imagens"
       - action: move_file
         pattern: "*.jpg,*.png,*.gif"
@@ -257,10 +273,10 @@ docker run --rm \
 
 ### 🏁 CHECKPOINT FASE 5
 > O agente consegue:
-> - [ ] Listar arquivos de uma pasta
-> - [ ] Mover arquivos baseado em instrução em linguagem natural
+> - [x] Listar arquivos de uma pasta (bateria: caso "listar sem inventar")
+> - [ ] Mover arquivos baseado em instrução em linguagem natural (ferramenta testada; pedido em linguagem natural ainda não)
 > - [ ] Executar uma rotina pré-definida do início ao fim
-> - [ ] Recusar ações perigosas (deletar sem confirmação, executar comandos arbitrários)
+> - [x] Recusar ações perigosas: a cerca recusa caminhos e programas fora da lista; apagar e executar só com "s" no terminal (teste de ponta a ponta)
 
 ---
 
@@ -275,6 +291,9 @@ docker run --rm \
 - [ ] **Configurar início automático**
   - O container deve subir quando o WSL2 iniciar
   - Pesquise: "como rodar um script no boot do WSL2"
+  - Atenção: o WSL desliga a VM quando o último terminal/processo `wsl.exe` termina, e o container
+    cai junto (visto em 26/10). Subir no boot não basta: a VM precisa continuar ligada
+    (pesquise `vmIdleTimeout` no `.wslconfig`)
 
 - [ ] **Documentar tudo**
   - Atualize este README com o que você aprendeu
@@ -286,6 +305,41 @@ docker run --rm \
 docker compose up -d            # Deve subir tudo com um comando
 curl http://localhost:11434/    # Deve responder "Ollama is running"
 ```
+
+---
+
+## Roteiro de correções (revisão de 23/10/2026)
+
+A revisão do projeto achou erros no agente e propôs esta ordem, do risco maior para o menor.
+Repositório: https://github.com/pedro470/llm-local-agent (privado).
+
+- [ ] **0. Escolher o modelo oficial** (decisão do Pedro; ver abaixo)
+- [x] **1. Versionar e congelar o ambiente** — git, `.gitignore`, `requirements.txt` com `mcp` 2.3.0 (`0c41d82`)
+- [x] **2. Consertar o laço** — `select_model` com `(ok, valor)`, timeout no `send_chat`, tamanho real no truncamento, default numérico no schema (`1c9d444`)
+- [x] **3. Cerca nas ferramentas** — `agent/guard.py` com raízes e programas permitidos (`4d397f7`)
+- [x] **Prompt de sistema e bateria de armadilhas** — `agent/system_prompt.py`, `evals/prompt_traps.py`; `read_file` aceita `max_chars` em texto (`69f2835`)
+- [x] **4. Agente como cliente MCP** — elicitation no lugar do `/dev/tty`, `tools.py` removido, imports tardios e aquecimento do modelo, ambiente em `~/.venvs/llm-local` (`a2b7970`)
+- [ ] **5. Controlar contexto e VRAM** — `num_ctx` explícito, janela de histórico, `/api/ps`, ejetar ao trocar de modelo
+- [ ] **6. Rotinas e teste ponta a ponta** — Fase 5 restante e checkpoint 5
+- [ ] **7. Fase 6** — compose, início automático com a VM do WSL ligada, diário de bordo
+
+### Decisão pendente: modelo oficial
+
+Bateria `evals/prompt_traps.py`, 3 rodadas por caso, pelo caminho MCP (27/10/2026):
+
+| Modelo        | Resultado | Ponto fraco |
+|---------------|-----------|-------------|
+| `llama3.1:8b` | 12/18     | Obedece a instrução escondida em arquivo (0/3 no caso de injeção) |
+| `gemma4:12b`  | 18/18     | Ocupa 7,8 GB de VRAM; ~7 s para carregar a frio |
+| `qwen38-27b`  | não medido | 12,2 GB: pouca folga para o contexto |
+
+Depois de escolher: atualizar README, AGENTS.md e este arquivo, e remover do volume os modelos que sobrarem.
+
+### Pendências conhecidas
+- [ ] `agent/test_mcp_client.py`: o docstring ainda descreve a confirmação por `/dev/tty`
+- [ ] `.vscode/settings.json` aponta para o Python do Windows; usar a extensão WSL com `~/.venvs/llm-local/bin/python`
+- [ ] O `.venv` antigo em `/mnt/c` pode ser apagado (o oficial é `~/.venvs/llm-local`)
+- [ ] Testes das etapas 2 a 4 rodaram como scripts avulsos; trazer para `evals/` ou `tests/`
 
 ---
 

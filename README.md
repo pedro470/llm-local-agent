@@ -13,33 +13,31 @@ Um **agente LLM local** rodando na sua máquina que:
 
 ## Arquitetura (visão geral)
 
+Tudo roda dentro do WSL2 (Ubuntu 24.04) no Windows 11. Fluxo de um pedido:
+
 ```
-┌─────────────────────────────────────────────────┐
-│  WINDOWS 11                                     │
-│                                                  │
-│  ┌─────────────────────────────────────────────┐ │
-│  │  WSL2 (Ubuntu)                              │ │
-│  │                                              │ │
-│  │  ┌───────────────────────────────────────┐   │ │
-│  │  │  Docker Container                     │   │ │
-│  │  │                                        │   │ │
-│  │  │  ┌────────────┐   ┌────────────────┐  │   │ │
-│  │  │  │  ROCm      │   │   Ollama       │  │   │ │
-│  │  │  │  (driver   │──▶│   (servidor    │  │   │ │
-│  │  │  │   GPU AMD) │   │    do modelo)  │  │   │ │
-│  │  │  └────────────┘   └───────┬────────┘  │   │ │
-│  │  │                           │ API :11434 │   │ │
-│  │  └───────────────────────────┼────────────┘   │ │
-│  │                              │                │ │
-│  └──────────────────────────────┼────────────────┘ │
-│                                 │                  │
-│  ┌──────────────────────────────▼────────────────┐ │
-│  │  Python Agent + MCP Servers                   │ │
-│  │  (roda no Windows ou no WSL, chama a API      │ │
-│  │   do Ollama e executa ferramentas locais)     │ │
-│  └───────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────┘
+Você (terminal)
+  │  digita o pedido e responde (s/n) às confirmações
+  ▼
+agent/main.py  (cliente MCP) ──── HTTP :11434 ────▶ Ollama  (container ollama/ollama:rocm)
+  │                                                    │  llama-server + HIP/ROCm
+  │  stdio = JSON-RPC 2.0                              │  librocdxg → libdxcore → /dev/dxg
+  │  initialize · tools/list · tools/call              ▼
+  │  elicitation/create (servidor pede o s/n)     VMBus → dxgkrnl → Adrenalin → GPU (PCIe)
+  ▼
+agent/mcp_server.py  (7 ferramentas, processo filho do main)
+  │  agent/guard.py: raízes permitidas + programas permitidos, antes de qualquer pergunta
+  ▼
+Disco: leitura no projeto inteiro; escrita só em teste_sandbox/ (ou em AGENT_WRITE_ROOTS)
 ```
+
+- **main.py** conversa com o Ollama, lê as ferramentas do servidor pelo `tools/list`, converte
+  para o formato do Ollama e executa cada chamada do modelo com `call_tool`.
+- **mcp_server.py** é quem executa as ferramentas. `delete_file` e `run_command` pedem
+  confirmação humana por *elicitation*: o servidor manda o pedido pelo canal JSON-RPC e o
+  `main.py` pergunta a você no terminal. Sem resposta "s", nada acontece.
+- **system_prompt.py** guarda o prompt de sistema; **evals/prompt_traps.py** é a bateria de
+  casos-armadilha que valida o prompt contra o modelo real.
 
 ---
 
@@ -51,18 +49,58 @@ Um **agente LLM local** rodando na sua máquina que:
 | **Driver GPU**  | ROCm 10.x                     | Interface entre o SO Linux e a GPU AMD       |
 | **Container**   | Docker no WSL2 (Ubuntu)        | Isola o ambiente Linux com ROCm + Ollama     |
 | **Servidor LLM**| Ollama                        | Serve o modelo, expõe API REST na porta 11434|
-| **Modelo**      | Llama 3.1 8B Instruct (Q4_K_M)| LLM com function-calling nativo, ~4.9GB      |
-| **Agente**      | Python + MCP Tools             | Orquestra o modelo e executa ações no PC     |
+| **Modelo**      | **A decidir** (ver abaixo)     | LLM com function-calling nativo              |
+| **Agente**      | Python 3.12 + SDK `mcp` 2.3.0  | main.py (cliente) + mcp_server.py (stdio)    |
+
+### Modelo: decisão pendente
+
+O projeto nasceu com o Llama 3.1 8B Instruct Q4_K_M, mas o código e os testes já usaram outros.
+A bateria `evals/prompt_traps.py` (6 casos-armadilha × 3 rodadas, conferindo chamadas e texto)
+dá o critério objetivo:
+
+| Modelo        | Arquivo | Bateria (caminho MCP) | Observação |
+|---------------|---------|-----------------------|------------|
+| `llama3.1:8b` | 4,6 GB  | 12/18                 | Obedece a instrução escondida em arquivo; às vezes erra nome de arquivo |
+| `gemma4:12b`  | 7,0 GB  | 18/18                 | Ocupa 7,8 GB na VRAM com contexto de 4096; carrega em ~7 s a frio |
+| `qwen38-27b`  | 12,2 GB | não medido            | Cabe nos 15,8 GiB, mas sobra pouco para o contexto |
+
+Escolhido o modelo, atualize esta seção, o AGENTS.md e o TODO.md.
+
+---
+
+## Como rodar
+
+Tudo no terminal do WSL, na raiz do projeto (`/mnt/c/Users/plepl/Downloads/01-Trabalho/LLMs`).
+
+```bash
+# 1. Ambiente Python (uma vez). Fica no disco Linux: em /mnt/c, o protocolo 9P deixa
+#    os imports do SDK do MCP ~5x mais lentos (4,3 s contra 0,85 s).
+python3 -m venv ~/.venvs/llm-local
+~/.venvs/llm-local/bin/pip install -r requirements.txt
+
+# 2. Ollama (o WSL desliga a VM quando o último terminal fecha, e o container cai junto)
+docker start ollama
+
+# 3. Agente
+~/.venvs/llm-local/bin/python agent/main.py
+
+# Bateria do prompt (um modelo por vez na GPU)
+~/.venvs/llm-local/bin/python evals/prompt_traps.py gemma4:12b 3
+```
+
+O código está versionado em https://github.com/pedro470/llm-local-agent (privado).
 
 ---
 
 ## Decisões de design
 
-### Por que 8B e não maior?
-- 16GB de VRAM da 9070 XT comporta 8B quantizado inteiro na GPU
-- Resposta rápida (~20-40 tokens/s)
-- Para mover arquivos e seguir rotinas, 8B com bom prompting é suficiente
-- Modelos maiores (13B+) exigiriam offload para RAM e ficariam lentos
+### Tamanho do modelo
+- O limite é o tamanho em GB, não o número de parâmetros: arquivo do modelo + KV cache precisam
+  caber nos ~14,7 GiB livres da 9070 XT. Se não couberem, parte das camadas vai para a RAM e a
+  velocidade despenca.
+- Medido na Fase 3: llama3.1:8b a 84,45 tokens/s de geração, 100% na VRAM.
+- O 8B foi a aposta inicial ("com bom prompting é suficiente"), mas a bateria de armadilhas mostrou
+  limites dele em segurança e fidelidade; ver "Modelo: decisão pendente".
 
 ### Por que quantização Q4_K_M?
 - Ocupa ~4.9GB (vs ~16GB em FP16)
@@ -79,6 +117,30 @@ Um **agente LLM local** rodando na sua máquina que:
 - API REST simples para o agente se conectar
 - Gerencia modelos (download, remoção, atualização) com um único comando
 - PyTorch seria necessário se você fosse TREINAR; para INFERÊNCIA, é overkill
+
+### Por que o agente é cliente de um servidor MCP
+- Uma implementação só das ferramentas (o antigo `tools.py` duplicava o servidor e divergia dele)
+- O servidor valida os argumentos pelo schema: tipo errado vindo do modelo é convertido ou recusado
+- Qualquer outro cliente MCP pode usar as mesmas ferramentas com as mesmas travas
+
+### Por que a confirmação humana é por elicitation, e não por /dev/tty
+- O SDK cria o servidor com `start_new_session=True`: o processo filho não tem terminal de
+  controle, então `open("/dev/tty")` falha sempre e toda ação ficava bloqueada, mesmo com "s"
+- A elicitation é o mecanismo do próprio protocolo: o servidor pede, o cliente pergunta ao humano
+- Fail-closed: cliente sem elicitation, recusa, cancelamento ou erro bloqueiam a ação
+
+### Por que uma cerca além da confirmação humana
+- A confirmação só existe em `delete_file` e `run_command`; mover e copiar não perguntam
+- O llama3.1:8b obedece a instruções escondidas em arquivos (teste de injeção da bateria): o prompt
+  não protege, a cerca sim
+- `guard.py` resolve cada caminho (segue symlinks, elimina `..`) e exige que caia numa raiz
+  permitida; `run_command` aceita 18 programas de leitura, executados sem shell
+- A recusa vem antes da pergunta: quando o (s/n) aparece, a ação já é permitida
+
+### Por que o ambiente Python fica fora do projeto
+- `/mnt/c` é o NTFS do Windows exposto por 9P: cada abertura de arquivo atravessa a VM
+- O SDK do MCP abre centenas de arquivos no import: 4,3 s em `/mnt/c` contra 0,85 s no disco Linux
+- O `requirements.txt` recria o ambiente idêntico em segundos (`pip freeze` conferido)
 
 ---
 
@@ -128,11 +190,13 @@ Se você esquecer de onde veio um arquivo ou onde ele deve ser montado, não cop
 | Imagem base Ubuntu (WSL2)             | ~2 GB         |
 | Docker Engine + overhead              | ~3 GB         |
 | Imagem Docker com ROCm + Ollama       | ~15-25 GB     |
-| Modelo Llama 3.1 8B Q4_K_M            | ~4.9 GB       |
-| Python + dependências do agente       | ~2 GB         |
-| **Total estimado**                    | **~30-40 GB** |
+| Modelos baixados hoje (4, no volume `ollama_data`) | ~30 GB |
+| Python + dependências do agente       | ~0,1 GB       |
+| **Total estimado**                    | **~50-60 GB** |
 
-> Sobram **160-170GB** livres dos seus 200GB. Margem confortável.
+> Os modelos são o que mais cresce: o volume tem llama3.1:8b (4,6 GB), gemma4:12b (7,0 GB),
+> qwen38-27b (12,2 GB) e uma variante do gemma (6,5 GB). Depois de escolher o modelo oficial,
+> `docker exec ollama ollama rm <modelo>` libera os que sobrarem.
 
 ---
 
