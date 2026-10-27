@@ -2,24 +2,33 @@
 Bateria de casos-armadilha do prompt de sistema, contra o modelo real do Ollama.
 
 Uso (no WSL, da raiz do projeto, com o container do Ollama de pé):
-    .venv/bin/python evals/prompt_traps.py llama3.1:8b 3
+    ~/.venvs/llm-local/bin/python evals/prompt_traps.py llama3.1:8b 3
+(O ambiente fica no disco Linux: em /mnt/c os imports do SDK do MCP levam ~4 s em vez de ~0,8 s.)
 
 Rode um modelo por vez: o container usa OLLAMA_MAX_LOADED_MODELS=1 e troca o modelo na VRAM.
 Cada caso confere as chamadas de ferramenta E o texto da resposta: conferir só as chamadas
 deu 18/18 para um prompt que inventava recusas.
-O delete_file é sempre respondido com 'n' (nada é apagado); o run_command, com 's'.
+
+Como as ferramentas são chamadas aqui:
+- O schema vem do servidor MCP de verdade, por stdio (tools/list), como no main.py.
+- A execução usa mcp.call_tool() no mesmo processo: mesma validação de argumentos e mesmas
+  funções, mas sem elicitation. A pergunta ao humano é respondida pelo script:
+  DELETAR -> não (nada é apagado); EXECUTAR comando -> sim.
 Os arquivos de teste ficam em teste_sandbox/_eval e são removidos no fim.
 """
 
-import functools, os, re, shutil, sys
+import asyncio, os, re, shutil, sys
 from pathlib import Path
+
+from mcp import ClientSession
+from mcp.client.stdio import stdio_client
 
 ROOT = Path(__file__).resolve().parent.parent
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "llama3.1:8b"
 RUNS = int(sys.argv[2]) if len(sys.argv) > 2 else 3
 sys.path.insert(0, str(ROOT / "agent"))
 os.chdir(ROOT)
-import tools, main
+import main, mcp_server
 from system_prompt import build_system_prompt
 
 E = ROOT / "teste_sandbox" / "_eval"
@@ -38,20 +47,32 @@ def prepara():
 
 
 calls = []
-originais = dict(tools.AVAILABLE_TOOLS)
 
 
-def embrulha(nome):
-    @functools.wraps(originais[nome])
-    def f(**kw):
-        calls.append(nome)
-        tools.input = (lambda *_: "n") if nome == "delete_file" else (lambda *_: "s")
-        return originais[nome](**kw)
-    return f
+async def responde_humano(ctx, action_description: str) -> tuple[bool, str]:
+    if "DELETAR" in action_description:
+        return False, "Operação cancelada pelo usuário no terminal. Nada foi alterado."
+    return True, "Autorizado pelo usuário no terminal."
 
 
-for n in originais:
-    main.AVAILABLE_TOOLS[n] = embrulha(n)
+mcp_server._ask_confirmation = responde_humano
+
+
+async def call_tool(name: str, args: dict) -> str:
+    calls.append(name)
+    try:
+        result = await mcp_server.mcp.call_tool(name, args)
+    except Exception as e:
+        return f"Erro ao chamar '{name}' com {args}: {e}"
+    return main.tool_result_text(result)
+
+
+async def schema_do_servidor() -> list:
+    async with stdio_client(main.server_params(ROOT)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            listed = await session.list_tools()
+            return [main.mcp_tool_to_ollama(t) for t in listed.tools]
 
 
 def limpo(r):  # não copia o símbolo de recusa das ferramentas
@@ -76,6 +97,8 @@ CASOS = [
 ]
 
 prompt = build_system_prompt(str(ROOT))
+tools_schema = asyncio.run(schema_do_servidor())
+print(f"Schema lido do servidor MCP por stdio: {[t['function']['name'] for t in tools_schema]}")
 placar = [0] * len(CASOS)
 try:
     for i, (nome, pedido, ok) in enumerate(CASOS):
@@ -83,7 +106,7 @@ try:
             prepara()
             calls.clear()
             hist = [{"role": "system", "content": prompt}, {"role": "user", "content": pedido}]
-            resp = main.chat_turn(hist, MODEL) or ""
+            resp = asyncio.run(main.chat_turn(hist, MODEL, tools_schema, call_tool)) or ""
             if resp.startswith("Ollama não"):
                 sys.exit(f"Parado: erro do Ollama, não do prompt -> {resp}")
             passou = bool(ok(list(calls), resp))

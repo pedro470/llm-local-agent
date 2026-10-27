@@ -1,3 +1,5 @@
+import time
+
 import requests
 
 
@@ -20,6 +22,19 @@ def get_available_models(base_url: str = "http://localhost:11434", require_tools
         return (False, "Nenhum modelo compatível encontrado")
 
     return (True, models)
+
+def warm_up(model: str, base_url: str = "http://localhost:11434", timeout: tuple[float, float] = (5, 300)) -> tuple[bool, str]:
+    # /api/generate sem prompt só carrega o modelo na VRAM e responde quando ele está pronto.
+    # Com OLLAMA_MAX_LOADED_MODELS=1, o Ollama descarrega o modelo anterior antes: nunca há dois na GPU.
+    start = time.perf_counter()
+    try:
+        response = requests.post(f"{base_url}/api/generate", json={"model": model}, timeout=timeout)
+    except requests.exceptions.RequestException as e:
+        return (False, f"Não foi possível carregar {model} na VRAM: {e}")
+    if response.status_code != 200:
+        return (False, f"Ollama respondeu {response.status_code} ao carregar {model}")
+    return (True, f"{model} carregado na VRAM em {time.perf_counter() - start:.1f} s")
+
 
 def send_chat(model: str, messages: list, tools: list | None = None, base_url: str = "http://localhost:11434", timeout: tuple[float, float] = (5, 300)) -> tuple[bool, dict | str]:
     # timeout = (conectar, ler): 5 s para abrir a conexão TCP; 300 s para a resposta,

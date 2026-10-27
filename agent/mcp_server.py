@@ -5,20 +5,32 @@ Transporte: STDIO (JSON-RPC sobre standard input/output)
 
 Blindagem de Segurança (Defense-in-Depth):
 1. Sem flags de bypass no schema (o LLM não pode enviar force=True).
-2. Human-in-the-Loop (HITL) via /dev/tty direto no kernel Linux (sem corromper o pipe stdio).
-   Se não houver terminal interativo (/dev/tty indisponível), opera em Fail-Closed (bloqueia).
+2. Human-in-the-Loop (HITL) por elicitation do MCP: o servidor manda um elicitation/create
+   pelo próprio canal JSON-RPC e o cliente pergunta ao humano. Fail-Closed: se o cliente não
+   suportar elicitation, recusar, cancelar ou der erro, a ação é bloqueada.
+   (O /dev/tty não serve: o SDK cria o servidor com start_new_session=True, então o processo
+   filho não tem terminal de controle e open("/dev/tty") falha sempre.)
 3. Soft-Delete (Quarentena): arquivos "deletados" são movidos para a pasta .trash/ com timestamp,
    nunca destruídos permanentemente via unlink().
 4. Cerca (guard.py): caminhos só dentro das raízes permitidas e run_command só com programas
    da lista, executados sem shell. A recusa vem antes da pergunta ao humano.
 """
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 import shutil
 import subprocess
-from mcp.server.mcpserver import MCPServer
+from typing import Annotated
+from pydantic import BaseModel, Field
+from mcp.server.mcpserver import Context, MCPServer
 from guard import check_path, check_command
+
+# Descrições que entram no JSON Schema de cada parâmetro (o modelo lê pelo tools/list).
+# Exemplos neutros ('.', 'agent') de propósito: exemplo concreto o modelo copia (example poisoning).
+_REL = "Use caminhos relativos ao diretório atual (ex: '.' ou 'agent') ou caminhos absolutos existentes."
+Dir = Annotated[str, Field(description=f"Caminho de um diretório existente. {_REL}")]
+File = Annotated[str, Field(description=f"Caminho de um arquivo existente. {_REL}")]
 
 # Inicializa o servidor MCP
 mcp = MCPServer("LocalFilesystem")
@@ -40,31 +52,29 @@ def _validate_path(path: Path, is_dir: bool = False, is_file: bool = False):
     return True, None
 
 
-def _ask_tty_confirmation(action_description: str) -> tuple[bool, str]:
+class Confirmacao(BaseModel):
+    """Formulário da elicitation: um único campo booleano."""
+    autorizar: bool = Field(description="true para autorizar a ação, false para bloquear")
+
+
+async def _ask_confirmation(ctx: Context, action_description: str) -> tuple[bool, str]:
     """
-    Solicita confirmação humana diretamente no terminal físico (/dev/tty),
-    isolado dos pipes sys.stdin e sys.stdout usados pelo JSON-RPC do MCP.
-    Opera em modo Fail-Closed: se não houver terminal acessível, nega a ação.
+    Pede a confirmação humana pelo cliente MCP (elicitation/create).
+    Só autoriza com action == "accept" E autorizar == true. Qualquer outra coisa bloqueia.
     """
     try:
-        with open("/dev/tty", "r+", encoding="utf-8") as tty:
-            tty.write(f"\n⚠️  [SEGURANÇA HITL - MCP SERVER] {action_description}\n")
-            tty.write("👉 Digite 's' para autorizar ou qualquer outra tecla para bloquear: ")
-            tty.flush()
-            resposta = tty.readline().strip().lower()
-            if resposta == "s":
-                return True, "Autorizado pelo usuário no terminal."
-            return False, "Operação bloqueada pelo usuário no terminal."
-    except OSError:
-        # Fail-Closed: se rodar em background sem TTY humano conectado, bloqueia!
-        return (
-            False,
-            "Operação bloqueada automaticamente (Fail-Closed): Nenhum terminal humano (/dev/tty) disponível para confirmar a ação.",
-        )
+        result = await ctx.elicit(message=f"[SEGURANÇA] {action_description}", schema=Confirmacao)
+    except Exception as e:
+        # Cliente sem suporte a elicitation, sem humano ou erro de transporte: Fail-Closed.
+        return False, f"Operação bloqueada automaticamente (Fail-Closed): não foi possível pedir confirmação ao humano ({e})."
+    if result.action == "accept" and result.data.autorizar:
+        return True, "Autorizado pelo usuário no terminal."
+    # A regra 7 do system_prompt.py reconhece "cancelada pelo usuário": mudar os dois juntos.
+    return False, "Operação cancelada pelo usuário no terminal. Nada foi alterado."
 
 
 @mcp.tool()
-def list_files(directory: str = ".") -> str:
+def list_files(directory: Dir = ".") -> str:
     """Lista os arquivos e subpastas de um diretório especificado, indicando se cada item é DIR ou FILE."""
     try:
         allowed, p = check_path(directory)
@@ -83,7 +93,10 @@ def list_files(directory: str = ".") -> str:
 
 
 @mcp.tool()
-def read_file(filepath: str, max_chars: int = 2000) -> str:
+def read_file(
+    filepath: File,
+    max_chars: Annotated[int, Field(description="Máximo de caracteres a ler; acima disso o conteúdo é truncado.")] = 2000,
+) -> str:
     """Lê o conteúdo textual de um arquivo até o limite de caracteres especificado."""
     try:
         allowed, p = check_path(filepath)
@@ -96,7 +109,7 @@ def read_file(filepath: str, max_chars: int = 2000) -> str:
             content = f.read(max_chars + 1)
             if len(content) > max_chars:
                 return (
-                    f"Aviso: Conteúdo truncado em {max_chars} caracteres.\n\n"
+                    f"Aviso: Conteúdo truncado em {max_chars} caracteres. O arquivo tem {p.stat().st_size} bytes no disco.\n\n"
                     f"{content[:max_chars]}...\n[Fim do trecho truncado]"
                 )
             return content
@@ -107,7 +120,9 @@ def read_file(filepath: str, max_chars: int = 2000) -> str:
 
 
 @mcp.tool()
-def create_directory(directory_path: str) -> str:
+def create_directory(
+    directory_path: Annotated[str, Field(description=f"Caminho do diretório a criar. {_REL}")],
+) -> str:
     """Cria um novo diretório (e diretórios pais intermediários se necessário)."""
     try:
         allowed, p = check_path(directory_path, write=True)
@@ -124,7 +139,7 @@ def create_directory(directory_path: str) -> str:
 
 
 @mcp.tool()
-def move_file(source_path: str, dest_path: str) -> str:
+def move_file(source_path: File, dest_path: Dir) -> str:
     """Move um arquivo da origem para o diretório de destino."""
     try:
         allowed, src = check_path(source_path, write=True)
@@ -150,7 +165,7 @@ def move_file(source_path: str, dest_path: str) -> str:
 
 
 @mcp.tool()
-def copy_file(source_path: str, dest_path: str) -> str:
+def copy_file(source_path: File, dest_path: Dir) -> str:
     """Copia um arquivo da origem para o diretório de destino preservando metadados."""
     try:
         allowed, src = check_path(source_path)
@@ -176,8 +191,9 @@ def copy_file(source_path: str, dest_path: str) -> str:
 
 
 @mcp.tool()
-def delete_file(source_path: str) -> str:
+async def delete_file(source_path: File, ctx: Context) -> str:
     """Remove um arquivo movendo-o para a quarentena (.trash) após confirmação humana obrigatória no terminal."""
+    # ctx é injetado pelo MCPServer (não aparece no schema que o modelo vê).
     try:
         allowed, p = check_path(source_path, write=True)
         if not allowed:
@@ -185,9 +201,9 @@ def delete_file(source_path: str) -> str:
         if not p.is_file():
             return f"Erro: '{source_path}' não existe ou não é um arquivo."
 
-        # 1. Trava física no terminal (/dev/tty) - O LLM NÃO tem como contornar
-        authorized, reason = _ask_tty_confirmation(
-            f"O agente solicitou DELETAR o arquivo: '{p}'"
+        # 1. Confirmação humana pelo cliente (elicitation) - o LLM não tem como responder por você
+        authorized, reason = await _ask_confirmation(
+            ctx, f"O agente solicitou DELETAR o arquivo: '{p}'"
         )
         if not authorized:
             return f"🛑 {reason}"
@@ -207,7 +223,10 @@ def delete_file(source_path: str) -> str:
 
 
 @mcp.tool()
-def run_command(command: str) -> str:
+async def run_command(
+    command: Annotated[str, Field(description="Linha de comando com um programa da lista permitida e seus argumentos.")],
+    ctx: Context,
+) -> str:
     """Executa um comando de leitura ou diagnóstico no Linux WSL2, sem shell, com timeout de 30s após confirmação humana obrigatória. Programas permitidos: ls, pwd, cat, head, tail, wc, du, df, stat, file, grep, uname, whoami, date, uptime, free, ps, which."""
     try:
         # 1. Lista de programas permitidos + caminhos dentro das raízes (guard.py)
@@ -215,15 +234,17 @@ def run_command(command: str) -> str:
         if not allowed:
             return argv
 
-        # 2. Trava física no terminal (/dev/tty) - O LLM NÃO tem como contornar
-        authorized, reason = _ask_tty_confirmation(
-            f"O agente solicitou EXECUTAR O COMANDO: `{command}`"
+        # 2. Confirmação humana pelo cliente (elicitation) - o LLM não tem como responder por você
+        authorized, reason = await _ask_confirmation(
+            ctx, f"O agente solicitou EXECUTAR O COMANDO: `{command}`"
         )
         if not authorized:
             return f"🛑 {reason}"
 
         # shell=False: argv vai direto para execve(); não há bash para interpretar | > ; $()
-        result = subprocess.run(
+        # to_thread: o comando pode levar até 30 s e não deve travar o laço de eventos do servidor.
+        result = await asyncio.to_thread(
+            subprocess.run,
             argv,
             shell=False,
             capture_output=True,

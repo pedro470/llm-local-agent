@@ -1,5 +1,5 @@
 """
-Cerca das ferramentas do agente (usada por tools.py e mcp_server.py).
+Cerca das ferramentas do agente (usada por mcp_server.py).
 
 1. Raízes permitidas: todo caminho é resolvido (resolve() segue symlinks e elimina '..')
    e só passa se cair dentro de uma raiz. Leitura: o projeto + as raízes de escrita.
