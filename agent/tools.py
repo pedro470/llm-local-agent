@@ -19,6 +19,12 @@ def validade_path(path: Path, is_dir: bool = False, is_file: bool = False):
     return True, None
 
 def read_file(filepath: str, max_chars: int = 2000) -> str:
+    # O Ollama repassa os argumentos como o modelo os escreveu, sem validar o schema:
+    # o llama3.1:8b manda max_chars como texto ('1000'). Converte antes de usar.
+    try:
+        max_chars = int(max_chars)
+    except (TypeError, ValueError):
+        return f"Erro: max_chars precisa ser um número inteiro, mas veio {max_chars!r}."
     try:
         allowed, p = check_path(filepath)
         if not allowed:

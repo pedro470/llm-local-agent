@@ -1,7 +1,7 @@
 from pathlib import Path
 from tools import AVAILABLE_TOOLS, TOOLS_SCHEMA
 from ollama_client import get_available_models, send_chat
-from guard import describe_roots
+from system_prompt import build_system_prompt
 import inspect
 
 def select_model() -> tuple[bool, str]:
@@ -60,21 +60,7 @@ if __name__ == "__main__":
   current_dir = Path.cwd()
 
   # AQUI: O histórico começa fora do while e persiste!
-  conversation_history = [{
-      "role": "system",
-      "content": (
-          "Você é um assistente pessoal inteligente rodando localmente na máquina do usuário.\n"
-          f"DIRETÓRIO DE TRABALHO ATUAL: {current_dir}. Você está dentro de uma máquina virtual WSL2, na distribuição Ubuntu 24.04. O /mnt/c é o volume c: do Windows e df / indica espaço virtual. Para espaço livre real, use df -h /mnt/c\n"
-          "DIRETRIZES DE COMPORTAMENTO:\n"
-          "1. Para saudações, conversas casuais ou perguntas teóricas, responda diretamente em texto em português SEM chamar ferramentas.\n"
-          "2. Se o usuário perguntar quais ferramentas você tem, apenas liste os nomes e descrições delas em texto puro.\n"
-          "3. Quando o usuário solicitar explicitamente alguma inspeção ou ação real no sistema operacional, aja em etapas usando as ferramentas disponíveis para chegar ao resultado final.\n"
-          "4. Quando o resultado final for ambíguo ou necessitar de ferramentas destrutivas, comunique ao usuário o que você entendeu e aguarde a confirmação.\n"
-          "5. Ao receber o retorno de uma ferramenta, SEMPRE apresente e resuma os dados obtidos na sua resposta final ao usuário.\n"
-          "6. Ao referenciar pastas locais, prefira sempre caminhos relativos ao diretório de trabalho atual (ex: '.', 'agent').\n"
-          f"7. LIMITES DAS FERRAMENTAS: {describe_roots()} Se uma ferramenta recusar um caminho ou comando, explique o limite ao usuário em vez de tentar contornar."
-      ),
-  }]
+  conversation_history = [{"role": "system", "content": build_system_prompt(str(current_dir))}]
 
   print(
       "🤖 Agente Local pronto (com memória ativa)! Digite sua instrução ou"
