@@ -60,7 +60,7 @@ O projeto nasceu com o Llama 3.1 8B Instruct Q4_K_M. A troca foi decidida pela b
 | Modelo        | Arquivo | Bateria (caminho MCP) | Observação |
 |---------------|---------|-----------------------|------------|
 | `llama3.1:8b` | 4,6 GB  | 12/18                 | Obedece a instrução escondida em arquivo; às vezes erra nome de arquivo |
-| `gemma4:12b`  | 7,0 GB  | 18/18                 | Ocupa 7,8 GB na VRAM com contexto de 4096; carrega em ~7 s a frio |
+| `gemma4:12b`  | 7,0 GB  | 18/18                 | Ocupa 7,8 GB na VRAM com contexto de 4096 (~8,1 GB com 32k); carrega em ~7 s a frio |
 | `qwen38-27b`  | 12,2 GB | não medido            | Cabe nos 15,8 GiB, mas sobra pouco para o contexto |
 
 O gemma4:12b foi o único sem falha, inclusive no caso de injeção (instrução escondida num
@@ -109,6 +109,23 @@ O código está versionado em https://github.com/pedro470/llm-local-agent (priva
 - Ocupa ~4.9GB (vs ~16GB em FP16)
 - Perda de qualidade mínima para tarefas de tool-use
 - Cabe 100% na VRAM com sobra para contexto
+
+### Contexto e VRAM (etapa 5, medido em 28/10/2026)
+- O agente pede `num_ctx = 32768` (`NUM_CTX` em `agent/ollama_client.py`, trocar com `AGENT_NUM_CTX`).
+  O padrão do Ollama é 4096, e o prompt de sistema mais o schema das 7 ferramentas já gastam 1.656.
+- KV cache do gemma4:12b: ~8,5 KiB por token. Só 8 das 48 camadas têm atenção global (cache que
+  cresce com o contexto); as outras 40 usam janela deslizante de 1024 tokens, com cache fixo de ~255 MiB.
+  Com 32k: 7,0 GB de pesos + 272 MiB de KV global + 255 MiB de KV deslizante + ~250 MiB de buffers.
+- O aquecimento usa o mesmo `num_ctx` do chat: o KV cache é alocado no carregamento, e um valor
+  diferente obriga o Ollama a recarregar o modelo.
+- Se o prompt passa do `num_ctx`, o Ollama descarta mensagens antigas sem avisar (2.298 tokens viraram
+  1.903 com `num_ctx=2048`, sem erro). Por isso o `main.py` tem a própria janela (`trim_history`):
+  corta pedidos inteiros, mais antigos primeiro, antes de cada chamada, e mantém o prompt de sistema
+  e o pedido atual. Depois do corte, uma nota no prompt de sistema avisa o modelo; sem a frase
+  "o primeiro pedido que você ainda vê NÃO é o primeiro", ele ignorava a nota em 4 de 5 rodadas.
+- Medidor: `prompt_eval_count` do Ollama conta o prompt inteiro, mesmo o trecho que veio do cache.
+  O `main.py` mostra o uso depois de cada resposta e, na subida, o que o `/api/ps` diz da VRAM.
+- O raciocínio do gemma4 (campo `thinking`) não entra no histórico: o template não o reenvia.
 
 ### Por que Docker em vez de instalar tudo direto?
 - Ambiente limpo, reprodutível, descartável

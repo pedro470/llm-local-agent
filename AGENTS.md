@@ -73,8 +73,9 @@ A partir da Fase 5, o formato de atuação é de **Pair Programming Ativo**:
   2. laço consertado (`select_model`, timeout, truncamento, schema)
   3. cerca `guard.py` (raízes e programas permitidos, recusa antes da pergunta)
   4. `main.py` como cliente MCP, elicitation no lugar do `/dev/tty`, `tools.py` removido, subida rápida
+  5. contexto e VRAM: `num_ctx` 32768, janela de histórico (`trim_history`), `/api/ps` e ejeção na subida
   Mais: prompt de sistema reescrito, bateria `evals/prompt_traps.py` e modelo oficial `gemma4:12b`.
-  **Próximo**: etapa 5 (contexto e VRAM: `num_ctx`, janela de histórico, `/api/ps`); depois rotinas YAML e checkpoint 5.
+  **Próximo**: etapa 6 (rotinas YAML e teste ponta a ponta) e checkpoint 5.
 
 ## Regras práticas (aprendidas no projeto)
 

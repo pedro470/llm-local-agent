@@ -216,8 +216,8 @@ docker run --rm \
 - [x] Ferramentas de sistema de arquivos e subprocessos com HITL (`agent/tools.py`, removido na etapa 4: as ferramentas agora vivem só no `mcp_server.py`)
 
 - Dividas técnicas a serem satisfeitas:
-    - [ ] Inspecionar a VRAM: GET /api/ps devolve exatamente quais modelos estão ocupando a memória de vídeo agora.
-    - [ ] Ejetar modelo ativo: POST /api/generate com {"model": "modelo_anterior", "keep_alive": 0} libera a VRAM instantaneamente. (Na prática o container já usa `OLLAMA_MAX_LOADED_MODELS=1`, que descarrega o anterior sozinho.)
+    - [x] Inspecionar a VRAM: GET /api/ps devolve exatamente quais modelos estão ocupando a memória de vídeo agora. (`loaded_models()`, etapa 5)
+    - [x] Ejetar modelo ativo (`unload()`; o `main.py` descarrega na subida o modelo que não for o escolhido): POST /api/generate com {"model": "modelo_anterior", "keep_alive": 0} libera a VRAM instantaneamente. (Na prática o container já usa `OLLAMA_MAX_LOADED_MODELS=1`, que descarrega o anterior sozinho.)
     - [x] Warm-up imediato: `warm_up()` em `ollama_client.py`; o `main.py` carrega o modelo em paralelo com a subida do servidor MCP (com o modelo na VRAM, o "Você:" aparece em 1,6 s).
 
 
@@ -319,7 +319,7 @@ Repositório: https://github.com/pedro470/llm-local-agent (privado).
 - [x] **3. Cerca nas ferramentas** — `agent/guard.py` com raízes e programas permitidos (`4d397f7`)
 - [x] **Prompt de sistema e bateria de armadilhas** — `agent/system_prompt.py`, `evals/prompt_traps.py`; `read_file` aceita `max_chars` em texto (`69f2835`)
 - [x] **4. Agente como cliente MCP** — elicitation no lugar do `/dev/tty`, `tools.py` removido, imports tardios e aquecimento do modelo, ambiente em `~/.venvs/llm-local` (`a2b7970`)
-- [ ] **5. Controlar contexto e VRAM** — `num_ctx` explícito, janela de histórico, `/api/ps`, ejetar ao trocar de modelo
+- [x] **5. Controlar contexto e VRAM** — `num_ctx` 32768 (`AGENT_NUM_CTX`), janela de histórico com nota de memória cortada, `/api/ps` e ejeção na subida; bateria 18/18 (detalhes no README, "Contexto e VRAM")
 - [ ] **6. Rotinas e teste ponta a ponta** — Fase 5 restante e checkpoint 5
 - [ ] **7. Fase 6** — compose, início automático com a VM do WSL ligada, diário de bordo
 
@@ -338,6 +338,9 @@ Escolhido o `gemma4:12b`: único 18/18, inclusive no caso de injeção. No códi
 - [ ] Opcional: remover do volume os modelos que não forem mais usados (`docker exec ollama ollama rm <modelo>`)
 
 ### Pendências conhecidas
+- [ ] Resposta vazia esporádica do gemma4: às vezes pensa (~100 a 200 tokens de `thinking`) e termina sem texto
+  nem ferramenta. Visto no 1º pedido do `main.py` em 2 de 3 execuções (28/10), 0 de 10 na chamada direta.
+  Ideia: no `chat_turn`, repetir a chamada uma vez quando vier vazia
 - [ ] `agent/test_mcp_client.py`: o docstring ainda descreve a confirmação por `/dev/tty`
 - [ ] `.vscode/settings.json` aponta para o Python do Windows; usar a extensão WSL com `~/.venvs/llm-local/bin/python`
 - [ ] O `.venv` antigo em `/mnt/c` pode ser apagado (o oficial é `~/.venvs/llm-local`)

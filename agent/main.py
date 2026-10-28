@@ -13,11 +13,21 @@ do Ollama (tool_calls) e o do MCP (call_tool) e faz a ponte da confirmação hum
 
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 
-from ollama_client import OFFICIAL_MODEL, get_available_models, send_chat, warm_up
+from ollama_client import NUM_CTX, OFFICIAL_MODEL, get_available_models, loaded_models, send_chat, unload, warm_up
 from system_prompt import build_system_prompt
+
+# Tokens reservados para a resposta do modelo (texto + tool_calls) dentro da janela NUM_CTX.
+RESPONSE_RESERVE = 4096
+# Nota que a janela acrescenta ao prompt de sistema depois de cortar o histórico.
+# A frase sobre o "primeiro pedido" é o que faz efeito: sem ela o gemma4 ignorou a nota em 4 de 5 rodadas.
+TRIM_NOTE = ("\n\nMemória curta: os {} pedidos mais antigos desta conversa saíram do histórico por falta "
+             "de espaço. O primeiro pedido que você ainda vê NÃO é o primeiro da conversa. Se o usuário "
+             "perguntar sobre algo anterior, diga que esse trecho saiu da sua memória.")
+TRIM_NOTE_RE = r"\n\nMemória curta: os (\d+) pedidos"
 
 # O SDK do MCP (pydantic, starlette, uvicorn, cryptography...) leva ~0,8 s para importar no
 # disco Linux e ~4 s em /mnt/c. Por isso ele é importado dentro das funções que o usam:
@@ -82,14 +92,56 @@ def server_params(cwd: Path):
   return StdioServerParameters(command=sys.executable, args=[str(SERVER_SCRIPT)], cwd=str(cwd))
 
 
-async def chat_turn(messages: list, model: str, tools_schema: list, call_tool, max_turns: int = 10) -> str:
+def estimate_tokens(obj) -> int:
+  # ~3,6 caracteres por token em português (medido: prompt de sistema de 2.928 caracteres = 806 tokens).
+  # Dividir por 3 erra para o lado seguro: a janela corta um pouco antes do necessário.
+  return len(json.dumps(obj, ensure_ascii=False)) // 3
+
+
+def trim_history(messages: list, tools_schema: list, num_ctx: int = NUM_CTX) -> int:
+  # Se o prompt passa do num_ctx, o Ollama descarta mensagens antigas sem avisar (medido:
+  # 2.298 tokens viraram 1.903 com num_ctx=2048, sem erro). Aqui o corte é nosso e visível.
+  # Corta rodadas inteiras, do pedido do usuário até antes do próximo: uma resposta de ferramenta
+  # sem o tool_call que a pediu confunde o modelo. O system (índice 0) e a rodada atual ficam sempre.
+  budget = num_ctx - RESPONSE_RESERVE - estimate_tokens(tools_schema)
+  user_idx = [i for i, m in enumerate(messages) if i > 0 and m["role"] == "user"]
+  removed = 0
+  while len(user_idx) > 1 and estimate_tokens(messages) > budget:
+    cut = user_idx[1]
+    del messages[1:cut]
+    user_idx = [i - (cut - 1) for i in user_idx[1:]]
+    removed += 1
+  if removed:
+    # Sem a nota, o modelo responde sobre o que sobrou como se fosse a conversa inteira
+    # (no teste, disse com certeza que o 1º arquivo lido era o 3º).
+    system = messages[0]["content"]
+    match = re.search(TRIM_NOTE_RE, system)
+    total = removed + (int(match.group(1)) if match else 0)
+    base = system[:match.start()] if match else system
+    messages[0] = {**messages[0], "content": base + TRIM_NOTE.format(total)}
+  return removed
+
+
+async def chat_turn(messages: list, model: str, tools_schema: list, call_tool, max_turns: int = 10, stats: dict | None = None) -> str:
   for turn in range(max_turns):
+    # A janela é conferida antes de cada chamada: dentro de um pedido, as respostas das
+    # ferramentas também fazem o histórico crescer.
+    removed = trim_history(messages, tools_schema)
+    if removed:
+      print(f"  🧹 [Janela]: {removed} rodada(s) antiga(s) saíram do histórico para caber em {NUM_CTX} tokens")
     # send_chat é bloqueante (requests); roda numa thread para não travar o laço de eventos
     # que lê o pipe do servidor MCP.
-    status, message = await asyncio.to_thread(send_chat, model, messages, tools_schema)
+    status, reply = await asyncio.to_thread(send_chat, model, messages, tools_schema)
     if not status:
-      return message
+      return reply
+    if stats is not None:
+      stats["prompt_tokens"] = reply["prompt_tokens"]
+      stats["output_tokens"] = reply["output_tokens"]
 
+    message = reply["message"]
+    # O template do gemma4 não reenvia o raciocínio das respostas antigas (medido: o prompt tem o mesmo
+    # tamanho com ou sem ele). Guardá-lo só faria a estimativa da janela contar texto que o modelo não vê.
+    message.pop("thinking", None)
     messages.append(message)
     if message.get("tool_calls"):
       for tool_call in message["tool_calls"]:
@@ -122,6 +174,13 @@ async def run_agent(model: str) -> None:
   from mcp.client.stdio import stdio_client
 
   current_dir = Path.cwd()
+  # O container já troca sozinho (OLLAMA_MAX_LOADED_MODELS=1), mas descarregar aqui deixa a troca
+  # explícita e libera a VRAM antes de o novo modelo começar a carregar.
+  ok, loaded = loaded_models()
+  if ok:
+    for m in loaded:
+      if m["name"] != model:
+        print(f"⏏️  {unload(m['name'])[1]}")
   # Aquecimento: pede ao Ollama para carregar o modelo na VRAM enquanto o servidor MCP sobe.
   # As duas esperas correm em paralelo, e a primeira mensagem não paga o carregamento.
   warming = asyncio.create_task(asyncio.to_thread(warm_up, model))
@@ -132,6 +191,9 @@ async def run_agent(model: str) -> None:
       listed = await session.list_tools()
       ok, msg = await warming
       print(f"🔥 {msg}")
+      ok, loaded = loaded_models()
+      for m in loaded if ok else []:
+        print(f"🧠 VRAM: {m['name']} ocupa {m['size_vram'] / 2**30:.1f} GiB, contexto de {m['context_length']} tokens")
       tools_schema = [mcp_tool_to_ollama(t) for t in listed.tools]
       names = {t.name for t in listed.tools}
 
@@ -158,8 +220,12 @@ async def run_agent(model: str) -> None:
           continue
 
         conversation_history.append({"role": "user", "content": prompt})
-        resposta = await chat_turn(conversation_history, model, tools_schema, call_tool)
+        stats = {}
+        resposta = await chat_turn(conversation_history, model, tools_schema, call_tool, stats=stats)
         print(f"\nAgente:\n{resposta}\n")
+        if stats:
+          used = stats["prompt_tokens"] + stats["output_tokens"]
+          print(f"📊 contexto: {used} de {NUM_CTX} tokens ({used / NUM_CTX:.0%})\n")
 
 
 if __name__ == "__main__":
