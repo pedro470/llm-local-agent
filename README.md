@@ -25,7 +25,7 @@ agent/main.py  (cliente MCP) ──── HTTP :11434 ────▶ Ollama  (c
   │  initialize · tools/list · tools/call              ▼
   │  elicitation/create (servidor pede o s/n)     VMBus → dxgkrnl → Adrenalin → GPU (PCIe)
   ▼
-agent/mcp_server.py  (7 ferramentas, processo filho do main)
+agent/mcp_server.py  (8 ferramentas, processo filho do main) ── agent/routines.py (rotinas YAML)
   │  agent/guard.py: raízes permitidas + programas permitidos, antes de qualquer pergunta
   ▼
 Disco: leitura no projeto inteiro; escrita só em teste_sandbox/ (ou em AGENT_WRITE_ROOTS)
@@ -33,10 +33,11 @@ Disco: leitura no projeto inteiro; escrita só em teste_sandbox/ (ou em AGENT_WR
 
 - **main.py** conversa com o Ollama, lê as ferramentas do servidor pelo `tools/list`, converte
   para o formato do Ollama e executa cada chamada do modelo com `call_tool`.
-- **mcp_server.py** é quem executa as ferramentas. `delete_file` e `run_command` pedem
+- **mcp_server.py** é quem executa as ferramentas. `delete_file`, `run_command` e `run_routine` pedem
   confirmação humana por *elicitation*: o servidor manda o pedido pelo canal JSON-RPC e o
   `main.py` pergunta a você no terminal. Sem resposta "s", nada acontece.
-- **system_prompt.py** guarda o prompt de sistema; **evals/prompt_traps.py** é a bateria de
+- **routines.py** executa as rotinas de `routines/` passo a passo, pelas mesmas funções das ferramentas.
+- **system_prompt.py** guarda o prompt de sistema (com o catálogo das rotinas); **evals/prompt_traps.py** é a bateria de
   casos-armadilha que valida o prompt contra o modelo real.
 
 ---
@@ -125,7 +126,30 @@ O código está versionado em https://github.com/pedro470/llm-local-agent (priva
   "o primeiro pedido que você ainda vê NÃO é o primeiro", ele ignorava a nota em 4 de 5 rodadas.
 - Medidor: `prompt_eval_count` do Ollama conta o prompt inteiro, mesmo o trecho que veio do cache.
   O `main.py` mostra o uso depois de cada resposta e, na subida, o que o `/api/ps` diz da VRAM.
-- O raciocínio do gemma4 (campo `thinking`) não entra no histórico: o template não o reenvia.
+- O raciocínio do gemma4 (campo `thinking`) fica no histórico só durante a rodada em andamento.
+  No meio de uma cadeia de ferramentas o template o reenvia (52 tokens sem, 299 com): é o plano do
+  modelo. Com a rodada encerrada, o template o descarta, e o `chat_turn` o apaga quando chega pedido
+  novo. A versão da etapa 5 apagava cedo demais, e o modelo criava a pasta, esquecia que faltava
+  mover e dizia "movi" (3 de 10 vezes; 15 de 15 certas depois da correção).
+
+### Rotinas: o modelo escolhe, o Python executa (etapa 6)
+- Cada rotina é um YAML em `routines/`. O modelo só escolhe a rotina e os parâmetros (`run_routine`);
+  `agent/routines.py` expande os arquivos, roda os passos em ordem e avalia as condições. O mesmo
+  pedido gera sempre as mesmas ações, e o modelo não tem como pular passo nem inventar resultado.
+- Os passos chamam as mesmas funções das ferramentas: a cerca vale igual, e recusa antes da pergunta
+  (caminho fora das raízes de escrita ou programa fora da lista barra a rotina inteira).
+- Uma confirmação só, com a lista de tudo que escreve ou executa comando. Os arquivos são expandidos
+  antes dessa pergunta: a lista que o humano aprova é a que roda. `delete_file` pergunta de novo,
+  arquivo por arquivo.
+- Passos: `tool` (com `save` para guardar a saída), `for_each` (arquivos de uma pasta por padrão,
+  com `before` que só roda se algo casou), `say` (conclusão para o relatório) e `stop`. Qualquer
+  passo aceita `when` (regex, e comparação numérica do grupo capturado): é a lógica condicional
+  do troubleshooting. Ver `routines/diagnostico-agente.yaml`.
+- O catálogo das rotinas vai no prompt de sistema. Com uma ferramenta `list_routines` no meio, o
+  modelo consultava, anunciava "vou executar" e parava (organizar 2/3, diagnóstico 1/3); com o
+  catálogo no prompt, 5/5 nos dois.
+- As rotinas só leem e organizam: a cerca não deixa o agente iniciar serviços. No troubleshooting,
+  a conclusão diz o comando que o usuário deve rodar (ex.: `docker start ollama`).
 
 ### Por que Docker em vez de instalar tudo direto?
 - Ambiente limpo, reprodutível, descartável

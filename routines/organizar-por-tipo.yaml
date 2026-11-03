@@ -1,0 +1,69 @@
+# Organiza os arquivos soltos de uma pasta em subpastas por tipo.
+# Só o primeiro nível da pasta; subpastas e arquivos de tipo desconhecido não são tocados.
+# A subpasta de um tipo só é criada se houver ao menos um arquivo daquele tipo (before).
+name: organizar-por-tipo
+description: Organiza os arquivos soltos de uma pasta em subpastas por tipo (Imagens, Documentos, Planilhas, Compactados, Videos, Audios). Arquivos de outros tipos ficam onde estão.
+params:
+  pasta:
+    description: pasta a organizar, dentro das raízes de escrita
+
+steps:
+  - for_each: {dir: "{pasta}", patterns: ["*.jpg", "*.jpeg", "*.png", "*.gif", "*.webp", "*.bmp", "*.svg"]}
+    as: arquivo
+    before:
+      - tool: create_directory
+        args: {directory_path: "{pasta}/Imagens"}
+    steps:
+      - tool: move_file
+        args: {source_path: "{arquivo}", dest_path: "{pasta}/Imagens"}
+
+  - for_each: {dir: "{pasta}", patterns: ["*.pdf", "*.doc", "*.docx", "*.odt", "*.rtf", "*.txt", "*.md"]}
+    as: arquivo
+    before:
+      - tool: create_directory
+        args: {directory_path: "{pasta}/Documentos"}
+    steps:
+      - tool: move_file
+        args: {source_path: "{arquivo}", dest_path: "{pasta}/Documentos"}
+
+  - for_each: {dir: "{pasta}", patterns: ["*.xls", "*.xlsx", "*.ods", "*.csv"]}
+    as: arquivo
+    before:
+      - tool: create_directory
+        args: {directory_path: "{pasta}/Planilhas"}
+    steps:
+      - tool: move_file
+        args: {source_path: "{arquivo}", dest_path: "{pasta}/Planilhas"}
+
+  - for_each: {dir: "{pasta}", patterns: ["*.zip", "*.rar", "*.7z", "*.tar", "*.gz"]}
+    as: arquivo
+    before:
+      - tool: create_directory
+        args: {directory_path: "{pasta}/Compactados"}
+    steps:
+      - tool: move_file
+        args: {source_path: "{arquivo}", dest_path: "{pasta}/Compactados"}
+
+  - for_each: {dir: "{pasta}", patterns: ["*.mp4", "*.mkv", "*.avi", "*.mov"]}
+    as: arquivo
+    before:
+      - tool: create_directory
+        args: {directory_path: "{pasta}/Videos"}
+    steps:
+      - tool: move_file
+        args: {source_path: "{arquivo}", dest_path: "{pasta}/Videos"}
+
+  - for_each: {dir: "{pasta}", patterns: ["*.mp3", "*.wav", "*.flac", "*.ogg", "*.m4a"]}
+    as: arquivo
+    before:
+      - tool: create_directory
+        args: {directory_path: "{pasta}/Audios"}
+    steps:
+      - tool: move_file
+        args: {source_path: "{arquivo}", dest_path: "{pasta}/Audios"}
+
+  # Conferência no fim (regra 14 do prompt, aqui garantida pelo código).
+  - tool: list_files
+    args: {directory: "{pasta}"}
+    save: final
+  - say: "Conteúdo de {pasta} depois da rotina:\n{final}"

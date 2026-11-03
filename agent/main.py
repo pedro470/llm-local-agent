@@ -123,6 +123,13 @@ def trim_history(messages: list, tools_schema: list, num_ctx: int = NUM_CTX) -> 
 
 
 async def chat_turn(messages: list, model: str, tools_schema: list, call_tool, max_turns: int = 10, stats: dict | None = None) -> str:
+  # O raciocínio (thinking) do gemma4 só é reenviado dentro da rodada em andamento: no meio de uma
+  # cadeia de ferramentas ele é o plano do modelo (medido: 52 tokens sem, 299 com). Com a rodada
+  # encerrada, o template o descarta. Apagar cedo fazia o modelo criar a pasta, esquecer que faltava
+  # mover e dizer "movi" (3 de 10). Por isso só sai das rodadas anteriores, quando chega pedido novo,
+  # para a estimativa da janela não contar texto que o modelo não vê.
+  for m in messages[:-1]:
+    m.pop("thinking", None)
   for turn in range(max_turns):
     # A janela é conferida antes de cada chamada: dentro de um pedido, as respostas das
     # ferramentas também fazem o histórico crescer.
@@ -139,9 +146,6 @@ async def chat_turn(messages: list, model: str, tools_schema: list, call_tool, m
       stats["output_tokens"] = reply["output_tokens"]
 
     message = reply["message"]
-    # O template do gemma4 não reenvia o raciocínio das respostas antigas (medido: o prompt tem o mesmo
-    # tamanho com ou sem ele). Guardá-lo só faria a estimativa da janela contar texto que o modelo não vê.
-    message.pop("thinking", None)
     messages.append(message)
     if message.get("tool_calls"):
       for tool_call in message["tool_calls"]:

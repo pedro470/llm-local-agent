@@ -18,6 +18,7 @@ Blindagem de Segurança (Defense-in-Depth):
 
 import asyncio
 from datetime import datetime
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -25,6 +26,7 @@ from typing import Annotated
 from pydantic import BaseModel, Field
 from mcp.server.mcpserver import Context, MCPServer
 from guard import check_path, check_command
+import routines
 
 # Descrições que entram no JSON Schema de cada parâmetro (o modelo lê pelo tools/list).
 # Exemplos neutros ('.', 'agent') de propósito: exemplo concreto o modelo copia (example poisoning).
@@ -240,7 +242,14 @@ async def run_command(
         )
         if not authorized:
             return f"🛑 {reason}"
+        return await _execute(argv, command)
+    except Exception as e:
+        return f"Erro ao executar comando: {e}"
 
+
+async def _execute(argv: list[str], command: str) -> str:
+    """Roda um argv já aprovado pela cerca e pelo humano (pelo run_command ou pela rotina)."""
+    try:
         # shell=False: argv vai direto para execve(); não há bash para interpretar | > ; $()
         # to_thread: o comando pode levar até 30 s e não deve travar o laço de eventos do servidor.
         result = await asyncio.to_thread(
@@ -259,6 +268,44 @@ async def run_command(
         return f"Erro: Timeout de 30s excedido ao executar '{command}'."
     except Exception as e:
         return f"Erro ao executar comando: {e}"
+
+
+# Ferramentas que uma rotina pode chamar direto; run_command e delete_file têm tratamento próprio.
+ROUTINE_TOOLS = {f.__name__: f for f in (list_files, read_file, create_directory, move_file, copy_file)}
+
+
+@mcp.tool()
+async def run_routine(
+    name: Annotated[str, Field(description="Nome exato de uma rotina da seção ROTINAS do prompt de sistema.")],
+    ctx: Context,
+    params: Annotated[dict[str, str] | None, Field(description="Parâmetros da rotina, com os nomes que a seção ROTINAS mostra.")] = None,
+) -> str:
+    """Executa uma rotina pronta do início ao fim e devolve o relatório. Pede uma confirmação ao usuário no terminal antes de qualquer passo que escreva ou execute comando."""
+
+    async def call(tool: str, args: dict) -> str:
+        if tool == "run_command":
+            # A cerca já conferiu o comando em routines.run, antes da pergunta; confere de novo aqui
+            # porque é este código que executa. A aprovação do humano veio na pergunta da rotina.
+            allowed, argv = check_command(args.get("command", ""))
+            return await _execute(argv, args["command"]) if allowed else argv
+        try:
+            if tool == "delete_file":
+                return await delete_file(ctx=ctx, **args)  # pergunta de novo, arquivo por arquivo
+            if tool not in ROUTINE_TOOLS:
+                return f"Erro: a ferramenta '{tool}' não pode ser usada em rotina."
+            return ROUTINE_TOOLS[tool](**args)
+        except TypeError as e:
+            return f"Erro: argumentos inválidos para {tool}: {e}"
+
+    async def confirm(text: str) -> tuple[bool, str]:
+        return await _ask_confirmation(ctx, text)
+
+    if isinstance(params, str):  # modelos às vezes mandam o objeto como texto JSON
+        try:
+            params = json.loads(params)
+        except json.JSONDecodeError:
+            return f"Erro: params deve ser um objeto, recebi {params!r}."
+    return await routines.run(name, params or {}, call, confirm)
 
 
 if __name__ == "__main__":

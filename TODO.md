@@ -241,41 +241,30 @@ docker run --rm \
   - Confirmação humana por elicitation do MCP (o `/dev/tty` não existe no processo filho: o SDK usa `start_new_session=True`)
 
 - [x] **Prompt de sistema revisado + bateria de armadilhas**
-  - `agent/system_prompt.py` e `evals/prompt_traps.py` (6 casos, conferindo chamadas e texto)
+  - `agent/system_prompt.py` e `evals/prompt_traps.py` (9 casos desde a etapa 6, conferindo chamadas, texto e disco)
 
-- [ ] **Implementar rotinas pré-definidas**
-  - Crie um diretório `routines/` com arquivos YAML ou JSON descrevendo rotinas
-  - Use os nomes reais das ferramentas e caminhos dentro das raízes de escrita: para mexer em
-    `~/Downloads`, inclua a pasta em `AGENT_WRITE_ROOTS` antes
-  - Exemplo de rotina:
-    ```yaml
-    name: "limpar-downloads"
-    description: "Organiza a pasta Downloads por tipo de arquivo"
-    steps:
-      - action: list_files
-        path: "~/Downloads"
-      - action: create_directory
-        path: "~/Downloads/Imagens"
-      - action: move_file
-        pattern: "*.jpg,*.png,*.gif"
-        destination: "~/Downloads/Imagens"
-      # ... etc
-    ```
+- [x] **Implementar rotinas pré-definidas** (etapa 6 do roteiro)
+  - `routines/organizar-por-tipo.yaml`, executada por `agent/routines.py` (o modelo só chama `run_routine`)
+  - Formato: passos `tool`, `for_each`, `say`, `stop`, com `when` (ver o docstring de `routines.py`)
+  - Para mexer em `~/Downloads`, inclua a pasta em `AGENT_WRITE_ROOTS` antes: a cerca vale igual
+  - Uma confirmação só, com a lista de ações já expandida; `delete_file` pergunta arquivo por arquivo
 
-- [ ] **Implementar rotinas de troubleshooting**
-  - Mesma ideia, mas com lógica condicional
-  - Ex: "Se o serviço X não está rodando, reinicie. Se falhar, verifique os logs."
+- [x] **Implementar rotinas de troubleshooting**
+  - `routines/diagnostico-agente.yaml`: Ollama rodando, memória do WSL, disco C:, tamanho da `.trash`
+  - Lógica condicional com `save` + `when` (regex e comparação numérica)
+  - "Reinicie o serviço" ficou como conclusão com o comando a rodar: a cerca não deixa o agente
+    iniciar serviços
 
-- [ ] **Testar end-to-end**
-  - Crie uma pasta de teste com arquivos bagunçados
-  - Peça ao agente para organizá-la
-  - Verifique se os arquivos foram movidos corretamente
+- [x] **Testar end-to-end**
+  - `main.py` real, pasta com 8 arquivos, pedido em linguagem natural, "s" no terminal: 7 arquivos
+    nas pastas certas e o de tipo desconhecido no lugar (28/10/2026)
+  - Bateria com 3 casos novos: organizar por rotina, diagnóstico por rotina, mover em linguagem natural
 
 ### 🏁 CHECKPOINT FASE 5
 > O agente consegue:
 > - [x] Listar arquivos de uma pasta (bateria: caso "listar sem inventar")
-> - [ ] Mover arquivos baseado em instrução em linguagem natural (ferramenta testada; pedido em linguagem natural ainda não)
-> - [ ] Executar uma rotina pré-definida do início ao fim
+> - [x] Mover arquivos baseado em instrução em linguagem natural (bateria: caso "mover em linguagem natural")
+> - [x] Executar uma rotina pré-definida do início ao fim (`organizar-por-tipo` no `main.py` real; bateria: casos de rotina)
 > - [x] Recusar ações perigosas: a cerca recusa caminhos e programas fora da lista; apagar e executar só com "s" no terminal (teste de ponta a ponta)
 
 ---
@@ -320,7 +309,7 @@ Repositório: https://github.com/pedro470/llm-local-agent (privado).
 - [x] **Prompt de sistema e bateria de armadilhas** — `agent/system_prompt.py`, `evals/prompt_traps.py`; `read_file` aceita `max_chars` em texto (`69f2835`)
 - [x] **4. Agente como cliente MCP** — elicitation no lugar do `/dev/tty`, `tools.py` removido, imports tardios e aquecimento do modelo, ambiente em `~/.venvs/llm-local` (`a2b7970`)
 - [x] **5. Controlar contexto e VRAM** — `num_ctx` 32768 (`AGENT_NUM_CTX`), janela de histórico com nota de memória cortada, `/api/ps` e ejeção na subida; bateria 18/18 (detalhes no README, "Contexto e VRAM")
-- [ ] **6. Rotinas e teste ponta a ponta** — Fase 5 restante e checkpoint 5
+- [x] **6. Rotinas e teste ponta a ponta** — executor determinístico (`routines.py`), 2 rotinas, catálogo no prompt, `thinking` mantido dentro da rodada; checkpoint 5; bateria 27/27 (03/11/2026)
 - [ ] **7. Fase 6** — compose, início automático com a VM do WSL ligada, diário de bordo
 
 ### Decisão: modelo oficial é o gemma4:12b
