@@ -1,0 +1,53 @@
+# Ollama com a RX 9070 XT (gfx1201) no Docker Engine do WSL2.
+#
+# Subir:   docker compose -f docker/docker-compose.yml up -d     (da raiz do projeto)
+# Testar:  curl http://localhost:11434/     -> "Ollama is running"
+#
+# É o mesmo container que antes nascia de um `docker run` longo; a tabela "Mapa Mental de
+# Baixo Nível" do README explica cada device, bind e variável abaixo.
+
+name: llm-local
+
+services:
+  ollama:
+    image: ollama/ollama:rocm
+    # Nome fixo: os scripts e o AGENTS.md chamam `docker start/exec ollama`.
+    container_name: ollama
+
+    # Início automático: o systemd do WSL sobe o dockerd no boot da VM, e o dockerd
+    # religa o container. "unless-stopped" respeita um `docker stop` manual.
+    restart: unless-stopped
+
+    # Caminho da GPU sem /dev/kfd: ROCm -> librocdxg -> libdxcore -> /dev/dxg -> VMBus -> Windows.
+    devices:
+      - /dev/dxg:/dev/dxg
+    volumes:
+      - ollama_data:/root/.ollama
+      - /usr/lib/wsl/lib/libdxcore.so:/usr/lib/libdxcore.so:ro
+      - /opt/rocm/lib/librocdxg.so:/usr/lib/librocdxg.so:ro
+      - /opt/rocm/lib/librocdxg.so:/opt/rocm/lib/librocdxg.so:ro
+
+    environment:
+      HSA_ENABLE_DXG_DETECTION: "1"      # ROCm procura o backend DXG em vez do /dev/kfd
+      OLLAMA_HOST: "0.0.0.0:11434"       # dentro do container; quem limita o acesso é o `ports`
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: "q8_0"       # KV cache em 8 bits: metade da VRAM do f16
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"      # 16 GB de VRAM: um modelo por vez
+
+    # Só o loopback do WSL. O Windows chega por localhost (encaminhamento do WSL); a rede local não.
+    ports:
+      - "127.0.0.1:11434:11434"
+
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  # O volume já existe e guarda os modelos (~30 GB). "external" impede o compose de criar
+  # outro com o prefixo do projeto (llm-local_ollama_data) e de apagá-lo num `down -v`.
+  ollama_data:
+    external: true

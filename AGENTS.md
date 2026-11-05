@@ -60,7 +60,7 @@ A partir da Fase 5, o formato de atuação é de **Pair Programming Ativo**:
 - `evals/prompt_traps.py` — Bateria de casos-armadilha do prompt contra o modelo real
 - `teste_sandbox/` — Única raiz de escrita padrão (fora do git)
 - `routines/` — Rotinas YAML: `organizar-por-tipo`, `diagnostico-agente`
-- `docker/` — (futuro) docker-compose.yml
+- `docker/docker-compose.yml` — Ollama com a GPU (`/dev/dxg` + ROCDXG), volume `ollama_data` externo, porta só no loopback
 
 ## Progresso Atual
 
@@ -77,15 +77,19 @@ A partir da Fase 5, o formato de atuação é de **Pair Programming Ativo**:
   5. contexto e VRAM: `num_ctx` 32768, janela de histórico (`trim_history`), `/api/ps` e ejeção na subida
   6. rotinas YAML com executor determinístico, catálogo no prompt e teste ponta a ponta (checkpoint 5)
   Mais: prompt de sistema reescrito, bateria `evals/prompt_traps.py` e modelo oficial `gemma4:12b`.
-  **Próximo**: etapa 7 (Fase 6: docker-compose, início automático com a VM do WSL ligada).
+- **FASE 6 CONCLUÍDA** (05/11/2026, etapa 7): `docker/docker-compose.yml` substitui o `docker run`;
+  início automático por systemd + `restart: unless-stopped`; a distro fica ligada sem terminal com
+  `[general] instanceIdleTimeout=-1` no `.wslconfig` do Windows. Checkpoint 6 aprovado.
 
 ## Regras práticas (aprendidas no projeto)
 
 - **Python**: rode sempre com `~/.venvs/llm-local/bin/python`, no WSL, da raiz do projeto.
 - **WSL a partir do Git Bash do Windows**: use `MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu --cd <caminho> -e bash -c '...'`.
   Sem isso, o Git Bash reescreve caminhos `/mnt/...`, e o `wsl.exe -- bash -lc` perde as aspas do comando.
-- **Ollama**: o WSL desliga a VM (e o container) quando o último `wsl.exe` termina. Faça `docker start ollama`
-  e o teste no MESMO comando.
+- **Ollama**: o container é do compose (`docker compose -f docker/docker-compose.yml ...`); não recrie com
+  `docker run`. Ele sobe sozinho no boot da VM, e a VM não desliga mais por ociosidade. Se a distro cair
+  mesmo assim, confira `[general] instanceIdleTimeout=-1` em `C:\Users\plepl\.wslconfig` (em `[wsl2]` é
+  ignorada) e `wsl.exe -l --running`.
 - **GPU**: um modelo por vez (o container usa `OLLAMA_MAX_LOADED_MODELS=1`). Confira `GET /api/ps` antes de
   trocar e descarregue no fim com `POST /api/generate {"model": "...", "keep_alive": 0}`.
 - **Prompt**: mudou `agent/system_prompt.py` ou uma rotina em `routines/` (o catálogo vai no prompt)? Rode

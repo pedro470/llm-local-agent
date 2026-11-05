@@ -82,8 +82,10 @@ Tudo no terminal do WSL, na raiz do projeto (`/mnt/c/Users/plepl/Downloads/01-Tr
 python3 -m venv ~/.venvs/llm-local
 ~/.venvs/llm-local/bin/pip install -r requirements.txt
 
-# 2. Ollama (o WSL desliga a VM quando o último terminal fecha, e o container cai junto)
-docker start ollama
+# 2. Ollama (uma vez). Depois disso ele sobe sozinho a cada boot da VM do WSL,
+#    e a VM fica ligada sem terminal aberto (ver "Fase 6" em Decisões de design).
+docker compose -f docker/docker-compose.yml up -d
+curl http://localhost:11434/      # "Ollama is running" (também do Windows)
 
 # 3. Agente
 ~/.venvs/llm-local/bin/python agent/main.py
@@ -150,6 +152,33 @@ O código está versionado em https://github.com/pedro470/llm-local-agent (priva
   catálogo no prompt, 5/5 nos dois.
 - As rotinas só leem e organizam: a cerca não deixa o agente iniciar serviços. No troubleshooting,
   a conclusão diz o comando que o usuário deve rodar (ex.: `docker start ollama`).
+
+### Fase 6: compose e VM sempre ligada (etapa 7, 05/11/2026)
+O `docker run` de uma linha virou `docker/docker-compose.yml`: mesmo container, mesmo nome
+(`ollama`), mesmo volume. A cadeia de início automático tem três elos, e cada um resolve uma coisa:
+
+| Elo | Onde | O que garante |
+|---|---|---|
+| `systemd=true` + `docker.service` habilitado | `/etc/wsl.conf` (já estava) | O dockerd sobe no boot da VM, sem terminal |
+| `restart: unless-stopped` | `docker-compose.yml` | O dockerd religa o container; um `docker stop` manual é respeitado |
+| `[general] instanceIdleTimeout=-1` | `C:\Users\plepl\.wslconfig` | A distro não desliga quando o último `wsl.exe` termina |
+
+O que se aprendeu no caminho:
+- Sem o 3º elo, a distro cai ~15 s depois do último `wsl.exe`, **mesmo com serviços do systemd
+  rodando**: o WSL conta sessões de terminal, não processos. Era a causa do "container caiu" de 26/10.
+- `vmIdleTimeout=-1` (em `[wsl2]`) sozinho não resolve: ele só segura a VM depois que todas as distros
+  pararam, e a distro (onde vive o dockerd) já tinha parado. Teste: VM desligada após 2 min.
+- No WSL 2.6.3, `instanceIdleTimeout` em `[wsl2]` dá "chave desconhecida"; o lugar é `[general]`.
+- Teste final: `wsl --shutdown`, um `wsl.exe -e true` que termina na hora, nenhum terminal aberto;
+  minutos depois o Windows ainda recebe `Ollama is running` em `localhost:11434`.
+- A porta só escuta no loopback (`127.0.0.1:11434`): o Windows chega pelo encaminhamento de
+  localhost do WSL; outra máquina da rede, não. O agente não tem autenticação, então isso importa.
+- O volume é `external: true`: o compose não cria um `llm-local_ollama_data` vazio ao lado dos modelos,
+  e um `docker compose down -v` não apaga ~15 GB de download.
+- Custo: a VM fica de pé até `wsl --shutdown` ou o Windows desligar. O modelo só ocupa VRAM enquanto
+  carregado (`keep_alive` de 5 min do Ollama); a RAM ociosa volta pelo `autoMemoryReclaim=gradual`.
+- O que **não** está automatizado: ligar a VM no logon do Windows. Ela sobe no primeiro `wsl.exe`
+  (abrir o terminal, o VS Code etc.) e daí em diante fica.
 
 ### Por que Docker em vez de instalar tudo direto?
 - Ambiente limpo, reprodutível, descartável
@@ -234,13 +263,13 @@ Se você esquecer de onde veio um arquivo ou onde ele deve ser montado, não cop
 | Imagem base Ubuntu (WSL2)             | ~2 GB         |
 | Docker Engine + overhead              | ~3 GB         |
 | Imagem Docker com ROCm + Ollama       | ~15-25 GB     |
-| Modelos baixados hoje (4, no volume `ollama_data`) | ~30 GB |
+| Modelos baixados hoje (2, no volume `ollama_data`) | ~15 GB |
 | Python + dependências do agente       | ~0,1 GB       |
-| **Total estimado**                    | **~50-60 GB** |
+| **Total estimado**                    | **~35-45 GB** |
 
-> Os modelos são o que mais cresce: o volume tem llama3.1:8b (4,6 GB), gemma4:12b (7,0 GB),
-> qwen38-27b (12,2 GB) e uma variante do gemma (6,5 GB). Com o gemma4:12b como oficial,
-> `docker exec ollama ollama rm <modelo>` libera os outros, se não forem mais usados para comparação.
+> Os modelos são o que mais cresce. Em 05/11/2026 o volume tem gemma4:12b (7,6 GB) e uma variante
+> do gemma 12B QAT (7,0 GB); llama3.1:8b e qwen38-27b já saíram. `docker exec ollama ollama rm <modelo>`
+> libera espaço.
 
 ---
 

@@ -271,27 +271,23 @@ docker run --rm \
 
 ## FASE 6 — Docker Compose e Persistência
 
-- [ ] **Criar `docker-compose.yml`** que:
-  - Sobe o Ollama com acesso à GPU
-  - Monta volumes para persistir modelos
-  - Expõe a porta 11434
-  - (Opcional) Sobe uma interface web como Open WebUI
+- [x] **Criar `docker-compose.yml`** — `docker/docker-compose.yml` (05/11/2026)
+  - Sobe o Ollama com acesso à GPU (`/dev/dxg` + binds da ROCDXG; log: `library=ROCm compute=gfx1201`)
+  - Volume `ollama_data` como `external` (os modelos que já existiam, sem risco no `down -v`)
+  - Porta 11434 só no loopback (`127.0.0.1`); o Windows chega por localhost
+  - (Opcional) Open WebUI: não feito, segue no backlog
 
-- [ ] **Configurar início automático**
-  - O container deve subir quando o WSL2 iniciar
-  - Pesquise: "como rodar um script no boot do WSL2"
-  - Atenção: o WSL desliga a VM quando o último terminal/processo `wsl.exe` termina, e o container
-    cai junto (visto em 26/10). Subir no boot não basta: a VM precisa continuar ligada
-    (pesquise `vmIdleTimeout` no `.wslconfig`)
+- [x] **Configurar início automático**
+  - systemd (já ligado) sobe o dockerd no boot; `restart: unless-stopped` religa o container
+  - VM ligada sem terminal: `[general] instanceIdleTimeout=-1` no `.wslconfig`. `vmIdleTimeout=-1`
+    sozinho não segurou (a distro caiu antes); `instanceIdleTimeout` em `[wsl2]` é chave desconhecida no WSL 2.6.3
+  - Não automatizado: ligar a VM no logon do Windows (sobe no primeiro `wsl.exe`)
 
-- [ ] **Documentar tudo**
-  - Atualize este README com o que você aprendeu
-  - Documente os problemas que encontrou e como resolveu
-  - Isso é o seu diário de bordo
+- [x] **Documentar tudo** — README, "Fase 6: compose e VM sempre ligada"
 
-### 🏁 CHECKPOINT FASE 6
+### 🏁 CHECKPOINT FASE 6 — aprovado em 05/11/2026
 ```bash
-docker compose up -d            # Deve subir tudo com um comando
+docker compose -f docker/docker-compose.yml up -d   # Deve subir tudo com um comando
 curl http://localhost:11434/    # Deve responder "Ollama is running"
 ```
 
@@ -310,7 +306,7 @@ Repositório: https://github.com/pedro470/llm-local-agent (privado).
 - [x] **4. Agente como cliente MCP** — elicitation no lugar do `/dev/tty`, `tools.py` removido, imports tardios e aquecimento do modelo, ambiente em `~/.venvs/llm-local` (`a2b7970`)
 - [x] **5. Controlar contexto e VRAM** — `num_ctx` 32768 (`AGENT_NUM_CTX`), janela de histórico com nota de memória cortada, `/api/ps` e ejeção na subida; bateria 18/18 (detalhes no README, "Contexto e VRAM")
 - [x] **6. Rotinas e teste ponta a ponta** — executor determinístico (`routines.py`), 2 rotinas, catálogo no prompt, `thinking` mantido dentro da rodada; checkpoint 5; bateria 27/27 (03/11/2026)
-- [ ] **7. Fase 6** — compose, início automático com a VM do WSL ligada, diário de bordo
+- [x] **7. Fase 6** — compose, início automático, distro ligada sem terminal (`instanceIdleTimeout`); checkpoint 6 (05/11/2026)
 
 ### Decisão: modelo oficial é o gemma4:12b
 
