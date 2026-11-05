@@ -293,6 +293,37 @@ curl http://localhost:11434/    # Deve responder "Ollama is running"
 
 ---
 
+## FASE 7 — llama.cpp nativo no Windows (fase extra, 05/11/2026)
+
+Objetivo: tirar WSL2, Docker e Ollama do caminho. O agente sobe o `llama-server.exe` como processo
+filho e fala com ele pela API OpenAI.
+
+- [x] **Organizar o host** — `C:\Users\plepl\llm\` com `llama.cpp\{rocm,vulkan}\` (b12094) e `models\*.gguf`
+  - O GGUF do gemma4 veio do volume do Ollama e traz o template de chat com tool calling
+- [x] **Cliente do llama-server** — `agent/llama_server.py` substitui `agent/ollama_client.py`
+  - Processo filho num Job Object (`KILL_ON_JOB_CLOSE`): Python morreu, servidor morre junto
+  - `-c 32768 -np 1 -ngl 99 -fa on --jinja --offline`, só em 127.0.0.1
+  - `reasoning_content` no lugar de `thinking`; `enable_thinking` pelo `chat_template_kwargs`
+  - VRAM pelo contador `GPU Process Memory` do Windows: 8,26 GiB com 32k
+- [x] **Cerca no Windows** — `run_command` com os GNU do Git + `tasklist`/`systeminfo`/`whoami`/`hostname`,
+  cada um com caminho absoluto (o `CreateProcess` procura na pasta atual); saída OEM decodificada
+- [x] **Rotina `diagnostico-agente`** — llama-server (inclusive órfão), memória pelo `systeminfo`, disco pelo `df -h .`
+- [x] **Bug do ambiente do servidor MCP** — as `AGENT_*` não chegavam ao `guard.py` (o SDK filtra o env)
+- [x] **Backends medidos pela bateria** — 27/27 nos dois; tempo médio ROCm 233 s, Vulkan 210 s
+  - Decisão do usuário: **Vulkan** é o padrão (`AGENT_BACKEND`); ROCm continua disponível
+  - Critério do caso "diagnóstico por rotina" ampliado: o modelo resume como "servidor do modelo"
+- [x] **Docs e limpeza** — `docker/`, `.gitattributes` e `ollama_client.py` removidos; `.venv` no projeto
+- [x] **Desmontar o WSL** — heretic copiado para `models\` (SHA-256 = digest do blob); `wsl --unregister Ubuntu`; `.wslconfig` removido
+
+### 🏁 CHECKPOINT FASE 7
+```powershell
+.venv\Scripts\python agent\test_connection.py          # sobe o servidor, responde "ok", encerra
+.venv\Scripts\python evals\prompt_traps.py gemma4-12b 3 # 27/27
+wsl -l -v                                                # sem distro
+```
+
+---
+
 ## Roteiro de correções (revisão de 23/10/2026)
 
 A revisão do projeto achou erros no agente e propôs esta ordem, do risco maior para o menor.
@@ -319,16 +350,13 @@ Bateria `evals/prompt_traps.py`, 3 rodadas por caso, pelo caminho MCP (27/10/202
 | `qwen38-27b`  | não medido | 12,2 GB: pouca folga para o contexto |
 
 Escolhido o `gemma4:12b`: único 18/18, inclusive no caso de injeção. No código: `OFFICIAL_MODEL` em
-`agent/ollama_client.py` (Enter no `main.py`, padrão da bateria).
-- [ ] Opcional: remover do volume os modelos que não forem mais usados (`docker exec ollama ollama rm <modelo>`)
+`agent/llama_server.py` (desde a Fase 7, `gemma4-12b`, o nome do GGUF; Enter no `main.py`, padrão da bateria).
 
 ### Pendências conhecidas
 - [ ] Resposta vazia esporádica do gemma4: às vezes pensa (~100 a 200 tokens de `thinking`) e termina sem texto
   nem ferramenta. Visto no 1º pedido do `main.py` em 2 de 3 execuções (28/10), 0 de 10 na chamada direta.
   Ideia: no `chat_turn`, repetir a chamada uma vez quando vier vazia
-- [ ] `agent/test_mcp_client.py`: o docstring ainda descreve a confirmação por `/dev/tty`
-- [ ] `.vscode/settings.json` aponta para o Python do Windows; usar a extensão WSL com `~/.venvs/llm-local/bin/python`
-- [ ] O `.venv` antigo em `/mnt/c` pode ser apagado (o oficial é `~/.venvs/llm-local`)
+- [x] `.vscode/settings.json` aponta para a `.venv` do projeto (Fase 7)
 - [ ] Testes das etapas 2 a 4 rodaram como scripts avulsos; trazer para `evals/` ou `tests/`
 
 ---
@@ -339,7 +367,7 @@ Escolhido o `gemma4:12b`: único 18/18, inclusive no caso de injeção. No códi
 - [ ] Implementar memória persistente (histórico de conversas)
 - [ ] Adicionar mais rotinas de automação
 - [ ] Testar modelos maiores (se precisar de mais capacidade de raciocínio)
-- [ ] Deep dive: A viagem do dado GPU-PV (como a instrução de inferência sai do Python no container, passa por /dev/kfd, dxgkrnl no WSL2, driver Adrenalin no Windows e chega no silício da GPU)
+- [ ] Deep dive: a viagem do dado no Windows nativo (Python → HTTP → llama-server → HIP/Vulkan → WDDM → driver Adrenalin → GPU)
 - [ ] Implementar sistema de logs e auditoria das ações do agente
 - [ ] Monitoramento de uso de GPU (temperatura, VRAM)
 
@@ -349,9 +377,8 @@ Escolhido o `gemma4:12b`: único 18/18, inclusive no caso de injeção. No códi
 
 | Recurso | Link |
 |---------|------|
-| Docker docs | https://docs.docker.com/ |
+| llama.cpp | https://github.com/ggml-org/llama.cpp |
 | ROCm docs | https://rocm.docs.amd.com/ |
-| Ollama docs | https://github.com/ollama/ollama |
 | MCP spec | https://spec.modelcontextprotocol.io/ |
 | Llama 3.1 | https://llama.meta.com/ |
 | Python venv | https://docs.python.org/3/library/venv.html |

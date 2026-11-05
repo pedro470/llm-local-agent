@@ -1,23 +1,26 @@
 """
-Agente local: laço de conversa com o Ollama + ferramentas servidas pelo mcp_server.py.
+Agente local: laço de conversa com o llama-server + ferramentas servidas pelo mcp_server.py.
 
-Arquitetura (cliente MCP por stdio):
-  main.py ──fork/exec──> python mcp_server.py   (o SDK usa start_new_session: o filho não tem terminal)
-     │  stdin/stdout do filho = canal JSON-RPC 2.0 (initialize, tools/list, tools/call)
-     │  stderr do filho       = logs do servidor, direto no terminal
-     └─ elicitation/create    = o servidor pede a confirmação (s/n) pelo mesmo canal;
-                                ask_human() pergunta a você aqui, no terminal do main
+Arquitetura (dois processos filhos, os dois presos a Job Objects do Windows):
+  main.py ──CreateProcess──> llama-server.exe   (o modelo; HTTP em 127.0.0.1:8080, ver llama_server.py)
+     │
+     └──────CreateProcess──> python mcp_server.py   (o SDK usa CREATE_NO_WINDOW: o filho não tem console)
+          stdin/stdout do filho = canal JSON-RPC 2.0 (initialize, tools/list, tools/call)
+          stderr do filho       = logs do servidor, direto no terminal
+          elicitation/create    = o servidor pede a confirmação (s/n) pelo mesmo canal;
+                                  ask_human() pergunta a você aqui, no terminal do main
 As ferramentas rodam no processo do servidor; este arquivo só traduz entre o formato
-do Ollama (tool_calls) e o do MCP (call_tool) e faz a ponte da confirmação humana.
+OpenAI (tool_calls) e o do MCP (call_tool) e faz a ponte da confirmação humana.
 """
 
 import asyncio
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-from ollama_client import NUM_CTX, OFFICIAL_MODEL, get_available_models, loaded_models, send_chat, unload, warm_up
+from llama_server import NUM_CTX, OFFICIAL_MODEL, LlamaServer, available_models, send_chat
 from system_prompt import build_system_prompt
 
 # Tokens reservados para a resposta do modelo (texto + tool_calls) dentro da janela NUM_CTX.
@@ -29,18 +32,17 @@ TRIM_NOTE = ("\n\nMemória curta: os {} pedidos mais antigos desta conversa saí
              "perguntar sobre algo anterior, diga que esse trecho saiu da sua memória.")
 TRIM_NOTE_RE = r"\n\nMemória curta: os (\d+) pedidos"
 
-# O SDK do MCP (pydantic, starlette, uvicorn, cryptography...) leva ~0,8 s para importar no
-# disco Linux e ~4 s em /mnt/c. Por isso ele é importado dentro das funções que o usam:
-# a checagem do Ollama e a lista de modelos aparecem antes desse custo.
+# O SDK do MCP (pydantic, starlette, uvicorn, cryptography...) leva perto de 1 s para importar.
+# Por isso ele é importado dentro das funções que o usam: a lista de modelos aparece antes desse custo.
 
 SERVER_SCRIPT = Path(__file__).resolve().parent / "mcp_server.py"
 
 
 def select_model() -> tuple[bool, str]:
-  status, models = get_available_models()
+  status, models = available_models()
   if not status:
     return (False, models)
-  official = next((m for m in models if m.split(":latest")[0] == OFFICIAL_MODEL), None)
+  official = OFFICIAL_MODEL if OFFICIAL_MODEL in models else None
   print("Modelos disponíveis:")
   for idx, model in enumerate(models):
     print(f"{idx}: {model}{'  (oficial)' if model == official else ''}")
@@ -54,8 +56,8 @@ def select_model() -> tuple[bool, str]:
     print(f"Opção inválida. Digite um número de 0 a {len(models) - 1}.")
 
 
-def mcp_tool_to_ollama(tool) -> dict:
-  # tools/list do MCP -> formato "function" que o /api/chat do Ollama espera.
+def mcp_tool_to_openai(tool) -> dict:
+  # tools/list do MCP -> formato "function" da API OpenAI, que o /v1/chat/completions espera.
   # O input_schema já é JSON Schema, gerado pelo servidor a partir das anotações de tipo.
   return {
       "type": "function",
@@ -89,7 +91,11 @@ def server_params(cwd: Path):
   from mcp import StdioServerParameters
   # sys.executable = o Python do .venv que está rodando o main: o servidor herda o mesmo ambiente.
   # cwd igual ao do main: caminhos relativos do modelo resolvem no mesmo lugar dos dois lados.
-  return StdioServerParameters(command=sys.executable, args=[str(SERVER_SCRIPT)], cwd=str(cwd))
+  # O SDK só repassa ao filho uma lista fixa de variáveis (PATH, USERPROFILE...): as AGENT_* da
+  # cerca (guard.py) precisam ir à mão. PYTHONUTF8: no Windows o padrão de open() é cp1252.
+  env = {k: v for k, v in os.environ.items() if k.startswith("AGENT_")}
+  env["PYTHONUTF8"] = "1"
+  return StdioServerParameters(command=sys.executable, args=[str(SERVER_SCRIPT)], cwd=str(cwd), env=env)
 
 
 def estimate_tokens(obj) -> int:
@@ -99,8 +105,8 @@ def estimate_tokens(obj) -> int:
 
 
 def trim_history(messages: list, tools_schema: list, num_ctx: int = NUM_CTX) -> int:
-  # Se o prompt passa do num_ctx, o Ollama descarta mensagens antigas sem avisar (medido:
-  # 2.298 tokens viraram 1.903 com num_ctx=2048, sem erro). Aqui o corte é nosso e visível.
+  # Se o prompt passa do num_ctx, o servidor recusa o pedido (o Ollama descartava mensagens antigas
+  # sem avisar). Aqui o corte é nosso, antes, e visível.
   # Corta rodadas inteiras, do pedido do usuário até antes do próximo: uma resposta de ferramenta
   # sem o tool_call que a pediu confunde o modelo. O system (índice 0) e a rodada atual ficam sempre.
   budget = num_ctx - RESPONSE_RESERVE - estimate_tokens(tools_schema)
@@ -122,14 +128,14 @@ def trim_history(messages: list, tools_schema: list, num_ctx: int = NUM_CTX) -> 
   return removed
 
 
-async def chat_turn(messages: list, model: str, tools_schema: list, call_tool, max_turns: int = 10, stats: dict | None = None) -> str:
-  # O raciocínio (thinking) do gemma4 só é reenviado dentro da rodada em andamento: no meio de uma
-  # cadeia de ferramentas ele é o plano do modelo (medido: 52 tokens sem, 299 com). Com a rodada
+async def chat_turn(messages: list, tools_schema: list, call_tool, max_turns: int = 10, stats: dict | None = None) -> str:
+  # O raciocínio (reasoning_content) do gemma4 só é reenviado dentro da rodada em andamento: no meio
+  # de uma cadeia de ferramentas ele é o plano do modelo (medido: 52 tokens sem, 299 com). Com a rodada
   # encerrada, o template o descarta. Apagar cedo fazia o modelo criar a pasta, esquecer que faltava
   # mover e dizer "movi" (3 de 10). Por isso só sai das rodadas anteriores, quando chega pedido novo,
   # para a estimativa da janela não contar texto que o modelo não vê.
   for m in messages[:-1]:
-    m.pop("thinking", None)
+    m.pop("reasoning_content", None)
   for turn in range(max_turns):
     # A janela é conferida antes de cada chamada: dentro de um pedido, as respostas das
     # ferramentas também fazem o histórico crescer.
@@ -138,7 +144,7 @@ async def chat_turn(messages: list, model: str, tools_schema: list, call_tool, m
       print(f"  🧹 [Janela]: {removed} rodada(s) antiga(s) saíram do histórico para caber em {NUM_CTX} tokens")
     # send_chat é bloqueante (requests); roda numa thread para não travar o laço de eventos
     # que lê o pipe do servidor MCP.
-    status, reply = await asyncio.to_thread(send_chat, model, messages, tools_schema)
+    status, reply = await asyncio.to_thread(send_chat, messages, tools_schema)
     if not status:
       return reply
     if stats is not None:
@@ -150,6 +156,7 @@ async def chat_turn(messages: list, model: str, tools_schema: list, call_tool, m
     if message.get("tool_calls"):
       for tool_call in message["tool_calls"]:
         fn_name = tool_call["function"]["name"]
+        # Na API OpenAI os argumentos chegam como texto JSON; o histórico guarda o texto original.
         fn_args = tool_call["function"]["arguments"]
         if isinstance(fn_args, str):
           try:
@@ -174,20 +181,22 @@ async def chat_turn(messages: list, model: str, tools_schema: list, call_tool, m
 
 
 async def run_agent(model: str) -> None:
+  current_dir = Path.cwd()
+  # O llama-server carrega o modelo na VRAM enquanto o servidor MCP sobe: as duas esperas correm
+  # em paralelo, e a primeira mensagem não paga o carregamento. Um servidor = um modelo.
+  llm = LlamaServer(model)
+  llm.start()
+  try:
+    await _session(llm, current_dir)
+  finally:
+    llm.stop()  # libera a VRAM; se o Python morrer antes disso, o Job Object mata o servidor
+
+
+async def _session(llm: LlamaServer, current_dir: Path) -> None:
   from mcp import ClientSession
   from mcp.client.stdio import stdio_client
 
-  current_dir = Path.cwd()
-  # O container já troca sozinho (OLLAMA_MAX_LOADED_MODELS=1), mas descarregar aqui deixa a troca
-  # explícita e libera a VRAM antes de o novo modelo começar a carregar.
-  ok, loaded = loaded_models()
-  if ok:
-    for m in loaded:
-      if m["name"] != model:
-        print(f"⏏️  {unload(m['name'])[1]}")
-  # Aquecimento: pede ao Ollama para carregar o modelo na VRAM enquanto o servidor MCP sobe.
-  # As duas esperas correm em paralelo, e a primeira mensagem não paga o carregamento.
-  warming = asyncio.create_task(asyncio.to_thread(warm_up, model))
+  warming = asyncio.create_task(asyncio.to_thread(llm.wait_ready))
   async with stdio_client(server_params(current_dir)) as (read, write):
     # elicitation_callback anuncia ao servidor, no initialize, que este cliente sabe pedir confirmação.
     async with ClientSession(read, write, elicitation_callback=ask_human) as session:
@@ -195,10 +204,10 @@ async def run_agent(model: str) -> None:
       listed = await session.list_tools()
       ok, msg = await warming
       print(f"🔥 {msg}")
-      ok, loaded = loaded_models()
-      for m in loaded if ok else []:
-        print(f"🧠 VRAM: {m['name']} ocupa {m['size_vram'] / 2**30:.1f} GiB, contexto de {m['context_length']} tokens")
-      tools_schema = [mcp_tool_to_ollama(t) for t in listed.tools]
+      if not ok:
+        return
+      print(f"🧠 {llm.vram_report()}")
+      tools_schema = [mcp_tool_to_openai(t) for t in listed.tools]
       names = {t.name for t in listed.tools}
 
       async def call_tool(name: str, args: dict) -> str:
@@ -225,7 +234,7 @@ async def run_agent(model: str) -> None:
 
         conversation_history.append({"role": "user", "content": prompt})
         stats = {}
-        resposta = await chat_turn(conversation_history, model, tools_schema, call_tool, stats=stats)
+        resposta = await chat_turn(conversation_history, tools_schema, call_tool, stats=stats)
         print(f"\nAgente:\n{resposta}\n")
         if stats:
           used = stats["prompt_tokens"] + stats["output_tokens"]
@@ -233,6 +242,8 @@ async def run_agent(model: str) -> None:
 
 
 if __name__ == "__main__":
+  # Com a saída redirecionada (log, pipe), o Windows usaria cp1252 e os emojis derrubariam o print.
+  sys.stdout.reconfigure(encoding="utf-8")
   ok, model = select_model()
   if not ok:
     print(f"Erro: {model}")

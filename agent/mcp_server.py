@@ -8,8 +8,8 @@ Blindagem de Segurança (Defense-in-Depth):
 2. Human-in-the-Loop (HITL) por elicitation do MCP: o servidor manda um elicitation/create
    pelo próprio canal JSON-RPC e o cliente pergunta ao humano. Fail-Closed: se o cliente não
    suportar elicitation, recusar, cancelar ou der erro, a ação é bloqueada.
-   (O /dev/tty não serve: o SDK cria o servidor com start_new_session=True, então o processo
-   filho não tem terminal de controle e open("/dev/tty") falha sempre.)
+   (Ler o console direto não serve: o SDK cria o servidor com CREATE_NO_WINDOW, então o processo
+   filho não tem console, e o stdin dele é o canal JSON-RPC.)
 3. Soft-Delete (Quarentena): arquivos "deletados" são movidos para a pasta .trash/ com timestamp,
    nunca destruídos permanentemente via unlink().
 4. Cerca (guard.py): caminhos só dentro das raízes permitidas e run_command só com programas
@@ -229,7 +229,7 @@ async def run_command(
     command: Annotated[str, Field(description="Linha de comando com um programa da lista permitida e seus argumentos.")],
     ctx: Context,
 ) -> str:
-    """Executa um comando de leitura ou diagnóstico no Linux WSL2, sem shell, com timeout de 30s após confirmação humana obrigatória. Programas permitidos: ls, pwd, cat, head, tail, wc, du, df, stat, file, grep, uname, whoami, date, uptime, free, ps, which."""
+    """Executa um comando de leitura ou diagnóstico no Windows, sem shell, com timeout de 30s após confirmação humana obrigatória. Programas permitidos: ls, pwd, cat, head, tail, wc, du, df, stat, file, grep, uname, date, which (GNU, do Git) e whoami, hostname, tasklist, systeminfo (Windows). Use '/' nos caminhos."""
     try:
         # 1. Lista de programas permitidos + caminhos dentro das raízes (guard.py)
         allowed, argv = check_command(command)
@@ -247,22 +247,30 @@ async def run_command(
         return f"Erro ao executar comando: {e}"
 
 
+def _decode(raw: bytes) -> str:
+    # Os programas do Git escrevem UTF-8; os do Windows (tasklist, systeminfo), na code page OEM
+    # do console (cp850 em pt-BR), em que "disponível" não é UTF-8 válido.
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("oem", errors="replace")
+
+
 async def _execute(argv: list[str], command: str) -> str:
     """Roda um argv já aprovado pela cerca e pelo humano (pelo run_command ou pela rotina)."""
     try:
-        # shell=False: argv vai direto para execve(); não há bash para interpretar | > ; $()
+        # shell=False: argv vai direto para o CreateProcess; não há cmd nem bash para interpretar | > ; $()
         # to_thread: o comando pode levar até 30 s e não deve travar o laço de eventos do servidor.
         result = await asyncio.to_thread(
             subprocess.run,
             argv,
             shell=False,
             capture_output=True,
-            text=True,
             timeout=30,
         )
         if result.returncode != 0:
-            return f"Exit code {result.returncode}. Erro:\n{result.stderr.strip()}"
-        out = result.stdout.strip()
+            return f"Exit code {result.returncode}. Erro:\n{_decode(result.stderr).strip()}"
+        out = _decode(result.stdout).strip()
         return out if out else "(Comando executado com sucesso sem saída)"
     except subprocess.TimeoutExpired:
         return f"Erro: Timeout de 30s excedido ao executar '{command}'."

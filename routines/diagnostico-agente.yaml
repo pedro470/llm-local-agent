@@ -1,39 +1,46 @@
 # Checklist de saúde do agente, com lógica condicional: cada checagem guarda a saída (save)
 # e os passos seguintes decidem pelo when o que concluir.
-# Só lê. O agente não pode iniciar serviços nem apagar nada (cerca do guard.py): quando acha um
+# Só lê. O agente não pode encerrar processos nem apagar nada (cerca do guard.py): quando acha um
 # problema, a conclusão diz o comando que o usuário deve rodar.
 name: diagnostico-agente
-description: Checklist de saúde do agente. Confere se o Ollama está rodando, a memória livre do WSL, o espaço no disco C e o tamanho da quarentena (.trash), e diz o que fazer em cada problema. Só lê.
+description: Checklist de saúde do agente. Confere o servidor do modelo (llama-server), a memória livre do Windows, o espaço no disco C e o tamanho da quarentena (.trash), e diz o que fazer em cada problema. Só lê.
 
 steps:
-  # 1. Ollama: o processo do container aparece no ps do WSL (o container usa o mesmo kernel).
+  # 1. llama-server: o main.py sobe um e o encerra ao sair. Dois ou mais = um órfão segurando ~8 GB
+  #    de VRAM e a porta 8080 (o Job Object evita isso, mas um servidor aberto à mão escapa dele).
   - tool: run_command
-    args: {command: "ps -eo comm="}
+    args: {command: 'tasklist /FI "IMAGENAME eq llama-server.exe" /NH /FO CSV'}
     save: processos
-  - say: "Ollama rodando."
-    when: {var: processos, matches: '^ollama$'}
-  - say: "Ollama NÃO está rodando. No terminal do WSL, rode: docker start ollama"
-    when: {var: processos, not_matches: '^ollama$'}
+  - say: "llama-server rodando (1 processo, o deste agente)."
+    when: {var: processos, matches: '^"llama-server\.exe"', not_matches: '(?s)llama-server\.exe.*llama-server\.exe'}
+  - say: "Há mais de um llama-server rodando: um deles está órfão e ocupa VRAM. No PowerShell, rode tasklist /FI \"IMAGENAME eq llama-server.exe\" e encerre o PID que não é deste agente com taskkill /PID <pid>."
+    when: {var: processos, matches: '(?s)llama-server\.exe.*llama-server\.exe'}
+  - say: "llama-server NÃO está rodando. Feche o agente e abra de novo com python agent/main.py."
+    when: {var: processos, not_matches: '^"llama-server\.exe"'}
 
-  # 2. Memória: a 6ª coluna do free -m é "available" (o que dá para usar sem tirar nada do cache).
+  # 2. Memória: o systeminfo escreve "Memória física disponível: 14.206 MB" (ponto de milhar do pt-BR).
+  #    O grupo captura o que vem antes do ponto, ou seja, milhares de MB (~GB).
   - tool: run_command
-    args: {command: "free -m"}
+    args: {command: "systeminfo /FO LIST"}
     save: memoria
-  - say: "Memória disponível no WSL abaixo de 2 GB: feche programas ou aumente memory no .wslconfig."
-    when: {var: memoria, matches: '^Mem:\s+(?:\d+\s+){5}(\d+)', lt: 2048}
-  - say: "Memória disponível no WSL ok (2 GB ou mais)."
-    when: {var: memoria, matches: '^Mem:\s+(?:\d+\s+){5}(\d+)', gte: 2048}
+  - say: "Memória disponível no Windows abaixo de 1 GB: crítico. Feche programas agora."
+    when: {var: memoria, matches: 'f\S*sica dispon\S*vel:\s+\d{1,3} MB'}
+  - say: "Memória disponível no Windows abaixo de 2 GB: feche programas antes de usar o agente."
+    when: {var: memoria, matches: 'f\S*sica dispon\S*vel:\s+(\d+)\.\d{3} MB', lt: 2}
+  - say: "Memória disponível no Windows ok (2 GB ou mais)."
+    when: {var: memoria, matches: 'f\S*sica dispon\S*vel:\s+(\d+)\.\d{3} MB', gte: 2}
 
-  # 3. Disco C: (onde ficam o projeto e o disco virtual do WSL com os modelos).
+  # 3. Disco C: (onde ficam o projeto e os modelos, em C:\Users\<você>\llm\models).
+  #    df -h . mostra a unidade da pasta atual; a última coluna é o ponto de montagem do Git (/c).
   - tool: run_command
-    args: {command: "df -h /mnt/c"}
+    args: {command: "df -h ."}
     save: disco
   - say: "Disco C: com 90% ou mais de uso: crítico. Libere espaço antes de baixar outro modelo (5 a 12 GB cada)."
-    when: {var: disco, matches: '(\d+)%\s+/mnt/c', gte: 90}
+    when: {var: disco, matches: '(\d+)%\s+\S+\s*$', gte: 90}
   - say: "Disco C: entre 75% e 90% de uso: atenção."
-    when: {var: disco, matches: '(\d+)%\s+/mnt/c', gte: 75, lt: 90}
+    when: {var: disco, matches: '(\d+)%\s+\S+\s*$', gte: 75, lt: 90}
   - say: "Disco C: abaixo de 75% de uso: ok."
-    when: {var: disco, matches: '(\d+)%\s+/mnt/c', lt: 75}
+    when: {var: disco, matches: '(\d+)%\s+\S+\s*$', lt: 75}
 
   # 4. Quarentena: só mede se a pasta existir (sem isso o du falharia numa máquina limpa).
   - tool: list_files

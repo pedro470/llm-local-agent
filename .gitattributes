@@ -1,3 +1,0 @@
-# Scripts de shell rodam no Linux: CRLF quebra o bash ("\r: command not found").
-# O core.autocrlf=true desta máquina converteria no checkout; isto força LF.
-*.sh text eol=lf

@@ -12,21 +12,20 @@ de troubleshooting. Tudo offline, tudo local.
 - **CPU**: AMD Ryzen 5 5500X3D
 - **RAM**: 32GB
 - **OS**: Windows 11 Home
-- **WSL2**: Instalado (para Docker + ROCm)
 - **Armazenamento disponível**: 200GB (negociável até 300GB)
 
-## Stack Definida
+## Stack Definida (desde a Fase 7: tudo nativo no Windows, sem WSL nem Docker)
 
-- **ROCm 10.x** para aceleração GPU via AMD
-- **Docker Engine** no WSL2 (Ubuntu) — NÃO Docker Desktop
-- **Ollama** (imagem `ollama/ollama:rocm`) como servidor de modelo
-- **Modelo oficial**: `gemma4:12b` (Q4_K_M, 7,8 GB na VRAM), decidido pelo usuário em 27/10/2026.
+- **llama.cpp** b12094 (`llama-server.exe`), builds em `C:\Users\plepl\llm\llama.cpp\{rocm,vulkan}\`.
+  Backend oficial: **Vulkan** (decidido pelo usuário em 05/11/2026; 210 s contra 233 s na bateria).
+  `AGENT_BACKEND=rocm` usa o build ROCm, que precisa do HIP SDK 7.2 (`C:\Program Files\AMD\ROCm\7.2\bin`).
+- **Modelos**: um GGUF por modelo em `C:\Users\plepl\llm\models\`; o nome do arquivo é o nome do modelo.
+- **Modelo oficial**: `gemma4-12b` (Q4_K_M, 8,3 GiB na VRAM com 32k), decidido pelo usuário em 27/10/2026.
   Na bateria de armadilhas fez 18/18, contra 12/18 do `llama3.1:8b` (o modelo original). No código:
-  `OFFICIAL_MODEL` em `agent/ollama_client.py`. Trocar de modelo é decisão do usuário.
-- **Agente**: Python 3.12 + SDK `mcp` 2.3.0. `agent/main.py` é cliente MCP e sobe `agent/mcp_server.py`
-  por stdio; a confirmação humana é por elicitation do MCP; a cerca fica em `agent/guard.py`.
-- **Ambiente Python**: `~/.venvs/llm-local` (disco Linux), recriado do `requirements.txt`. O `.venv`
-  dentro do projeto (em `/mnt/c`) é antigo e ~5x mais lento por causa do 9P.
+  `OFFICIAL_MODEL` em `agent/llama_server.py`. Trocar de modelo é decisão do usuário.
+- **Agente**: Python 3.12 + SDK `mcp` 2.3.0. `agent/main.py` sobe o `llama-server` (filho, num Job Object)
+  e o `agent/mcp_server.py` (stdio); a confirmação humana é por elicitation do MCP; a cerca fica em `agent/guard.py`.
+- **Ambiente Python**: `.venv` na raiz do projeto, recriado do `requirements.txt` (`py -3.12 -m venv .venv`).
 
 ## Perfil e Nível Técnico do Usuário
 
@@ -50,19 +49,16 @@ A partir da Fase 5, o formato de atuação é de **Pair Programming Ativo**:
 - `README.md` — Arquitetura, stack, como rodar, decisões de design
 - `TODO.md` — Fases com checkpoints, roteiro de correções (etapas 0 a 7) e decisão do modelo
 - `AGENTS.md` — (este arquivo) Instruções permanentes para o agente
-- `agent/main.py` — Laço de conversa com o Ollama; cliente MCP; pergunta (s/n) ao humano
+- `agent/main.py` — Laço de conversa com o llama-server; cliente MCP; pergunta (s/n) ao humano
 - `agent/mcp_server.py` — As 8 ferramentas (servidor MCP, stdio), incluindo `run_routine`
 - `agent/routines.py` — Executor das rotinas YAML (determinístico; o modelo só escolhe a rotina)
 - `agent/guard.py` — Cerca: raízes permitidas e programas permitidos
 - `agent/system_prompt.py` — Prompt de sistema (com as regras para editá-lo)
-- `agent/ollama_client.py` — `/api/tags`, `/api/chat` e aquecimento do modelo
+- `agent/llama_server.py` — Sobe/encerra o `llama-server`, `/health`, VRAM e `/v1/chat/completions`
 - `agent/test_connection.py`, `agent/test_mcp_client.py` — Checagens manuais
 - `evals/prompt_traps.py` — Bateria de casos-armadilha do prompt contra o modelo real
 - `teste_sandbox/` — Única raiz de escrita padrão (fora do git)
 - `routines/` — Rotinas YAML: `organizar-por-tipo`, `diagnostico-agente`
-- `docker/docker-compose.yml` — Ollama com a GPU (`/dev/dxg` + ROCDXG), volume `ollama_data` externo, porta só no loopback
-- `docker/check-host.sh` — Confere os pré-requisitos do host antes do `up` (o compose não instala nada);
-  `.gitattributes` mantém os `.sh` em LF
 
 ## Progresso Atual
 
@@ -82,18 +78,18 @@ A partir da Fase 5, o formato de atuação é de **Pair Programming Ativo**:
 - **FASE 6 CONCLUÍDA** (05/11/2026, etapa 7): `docker/docker-compose.yml` substitui o `docker run`;
   início automático por systemd + `restart: unless-stopped`; a distro fica ligada sem terminal com
   `[general] instanceIdleTimeout=-1` no `.wslconfig` do Windows. Checkpoint 6 aprovado.
+- **FASE 7** (fase extra, 05/11/2026): WSL2, Docker e Ollama saíram; o agente sobe o `llama-server.exe`
+  nativo como processo filho. O setup antigo fica no histórico do git (commit `76a8228`).
 
 ## Regras práticas (aprendidas no projeto)
 
-- **Python**: rode sempre com `~/.venvs/llm-local/bin/python`, no WSL, da raiz do projeto.
-- **WSL a partir do Git Bash do Windows**: use `MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu --cd <caminho> -e bash -c '...'`.
-  Sem isso, o Git Bash reescreve caminhos `/mnt/...`, e o `wsl.exe -- bash -lc` perde as aspas do comando.
-- **Ollama**: o container é do compose (`docker compose -f docker/docker-compose.yml ...`); não recrie com
-  `docker run`. Ele sobe sozinho no boot da VM, e a VM não desliga mais por ociosidade. Se a distro cair
-  mesmo assim, confira `[general] instanceIdleTimeout=-1` em `C:\Users\plepl\.wslconfig` (em `[wsl2]` é
-  ignorada) e `wsl.exe -l --running`.
-- **GPU**: um modelo por vez (o container usa `OLLAMA_MAX_LOADED_MODELS=1`). Confira `GET /api/ps` antes de
-  trocar e descarregue no fim com `POST /api/generate {"model": "...", "keep_alive": 0}`.
+- **Python**: rode sempre com `.venv\Scripts\python` (ou `.venv/Scripts/python` no Git Bash), da raiz do projeto.
+  Saída redirecionada no Windows é cp1252: os scripts fazem `sys.stdout.reconfigure(encoding="utf-8")`.
+- **llama-server**: quem sobe é o `main.py` (ou a bateria, ou o `test_connection.py`), e ele morre junto
+  com o Python. Não rode dois ao mesmo tempo: a porta 8080 e a VRAM são de um só. Log em `logs/llama-server.log`.
+  Órfão (aberto à mão, fora do Job Object): `tasklist /FI "IMAGENAME eq llama-server.exe"` e `taskkill /PID`.
+- **GPU**: um modelo por vez, naturalmente: um servidor = um GGUF. Trocar de modelo = sair e entrar no agente.
+- **Vulkan**: precisa de `VK_LOADER_LAYERS_DISABLE=VK_LAYER_Twitch_Overlay` (o `llama_server.py` define).
 - **Prompt**: mudou `agent/system_prompt.py` ou uma rotina em `routines/` (o catálogo vai no prompt)? Rode
   `evals/prompt_traps.py` antes de commitar. Não cite no
   prompt símbolos ou exemplos que o modelo não deva copiar (o 🛑 citado virou recusa inventada).
@@ -108,5 +104,5 @@ A partir da Fase 5, o formato de atuação é de **Pair Programming Ativo**:
 ## Referências Rápidas
 
 - ROCm compat matrix: https://rocm.docs.amd.com/en/latest/compatibility/compatibility-matrix.html
-- Ollama Docker ROCm: `docker pull ollama/ollama:rocm`
+- llama.cpp releases (builds Windows ROCm e Vulkan): https://github.com/ggml-org/llama.cpp/releases
 - GPU target: `gfx1201`

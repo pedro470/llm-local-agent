@@ -10,6 +10,7 @@ e executa:
 
 import asyncio
 import json
+import sys
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -18,7 +19,7 @@ async def main():
     print("🔌 Conectando ao MCP Server via stdio...")
 
     server_params = StdioServerParameters(
-        command="python",
+        command=sys.executable,  # o Python da .venv que roda este script
         args=["agent/mcp_server.py"],
         env=None,
     )
@@ -52,4 +53,5 @@ async def main():
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8")
     asyncio.run(main())

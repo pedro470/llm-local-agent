@@ -20,11 +20,11 @@ from routines import describe_catalog
 
 
 def build_system_prompt(cwd: str) -> str:
-    return f"""Você é o agente local de arquivos do Pedro. Roda no WSL2 (Ubuntu 24.04) da máquina dele, sem internet. Responda sempre em português do Brasil, de forma curta e direta.
+    return f"""Você é o agente local de arquivos do Pedro. Roda no Windows 11 da máquina dele, sem internet. Responda sempre em português do Brasil, de forma curta e direta.
 
 AMBIENTE
 - Diretório de trabalho: {cwd}. Use caminhos relativos a ele.
-- /mnt/c é o disco C: do Windows. Para espaço livre real, use df -h /mnt/c; df / mostra o disco virtual do WSL.
+- Nos caminhos, use / como separador (C:/Users/...), nunca a barra invertida. Para espaço livre no disco C:, use df -h .
 - {describe_roots()}
 
 QUANDO USAR FERRAMENTA

@@ -13,26 +13,29 @@ Um **agente LLM local** rodando na sua máquina que:
 
 ## Arquitetura (visão geral)
 
-Tudo roda dentro do WSL2 (Ubuntu 24.04) no Windows 11. Fluxo de um pedido:
+Tudo roda nativo no Windows 11, sem WSL nem Docker (Fase 7). Fluxo de um pedido:
 
 ```
 Você (terminal)
   │  digita o pedido e responde (s/n) às confirmações
   ▼
-agent/main.py  (cliente MCP) ──── HTTP :11434 ────▶ Ollama  (container ollama/ollama:rocm)
-  │                                                    │  llama-server + HIP/ROCm
-  │  stdio = JSON-RPC 2.0                              │  librocdxg → libdxcore → /dev/dxg
-  │  initialize · tools/list · tools/call              ▼
-  │  elicitation/create (servidor pede o s/n)     VMBus → dxgkrnl → Adrenalin → GPU (PCIe)
+agent/main.py  (cliente MCP) ── HTTP 127.0.0.1:8080 ──▶ llama-server.exe  (llama.cpp, processo filho)
+  │                             /v1/chat/completions     │  ROCm (HIP SDK) ou Vulkan
+  │  stdio = JSON-RPC 2.0                                ▼
+  │  initialize · tools/list · tools/call           driver Adrenalin (WDDM) → GPU (PCIe)
+  │  elicitation/create (servidor pede o s/n)
   ▼
 agent/mcp_server.py  (8 ferramentas, processo filho do main) ── agent/routines.py (rotinas YAML)
   │  agent/guard.py: raízes permitidas + programas permitidos, antes de qualquer pergunta
   ▼
-Disco: leitura no projeto inteiro; escrita só em teste_sandbox/ (ou em AGENT_WRITE_ROOTS)
+Disco: leitura no projeto inteiro; escrita só em teste_sandbox\ (ou em AGENT_WRITE_ROOTS)
 ```
 
-- **main.py** conversa com o Ollama, lê as ferramentas do servidor pelo `tools/list`, converte
-  para o formato do Ollama e executa cada chamada do modelo com `call_tool`.
+- **main.py** sobe o llama-server com o modelo escolhido, lê as ferramentas do servidor MCP pelo
+  `tools/list`, converte para o formato OpenAI e executa cada chamada do modelo com `call_tool`.
+  Ao sair, encerra o llama-server e a VRAM volta ao sistema.
+- **llama_server.py** monta a linha de comando do servidor, espera o `/health`, mede a VRAM e fala
+  com o `/v1/chat/completions`.
 - **mcp_server.py** é quem executa as ferramentas. `delete_file`, `run_command` e `run_routine` pedem
   confirmação humana por *elicitation*: o servidor manda o pedido pelo canal JSON-RPC e o
   `main.py` pergunta a você no terminal. Sem resposta "s", nada acontece.
@@ -44,16 +47,16 @@ Disco: leitura no projeto inteiro; escrita só em teste_sandbox/ (ou em AGENT_WR
 
 ## Stack tecnológica
 
-| Camada          | Tecnologia                     | Função                                      |
-|-----------------|--------------------------------|----------------------------------------------|
-| **GPU**         | AMD RX 9070 XT (`gfx1201`)    | Aceleração da inferência do modelo           |
-| **Driver GPU**  | ROCm 10.x                     | Interface entre o SO Linux e a GPU AMD       |
-| **Container**   | Docker no WSL2 (Ubuntu)        | Isola o ambiente Linux com ROCm + Ollama     |
-| **Servidor LLM**| Ollama                        | Serve o modelo, expõe API REST na porta 11434|
-| **Modelo**      | **gemma4:12b** (Q4_K_M)        | 11,9B parâmetros, 7,0 GB; 7,8 GB na VRAM     |
-| **Agente**      | Python 3.12 + SDK `mcp` 2.3.0  | main.py (cliente) + mcp_server.py (stdio)    |
+| Camada          | Tecnologia                         | Função                                         |
+|-----------------|------------------------------------|------------------------------------------------|
+| **GPU**         | AMD RX 9070 XT (`gfx1201`, 16 GB)  | Aceleração da inferência do modelo             |
+| **Driver GPU**  | Adrenalin (WDDM) + HIP SDK 7.2     | O HIP SDK só é preciso no backend ROCm         |
+| **Servidor LLM**| llama.cpp `llama-server` b12094 (Vulkan) | Serve o GGUF, API OpenAI em 127.0.0.1:8080 |
+| **Modelo**      | **gemma4-12b** (Q4_K_M)            | 11,9B parâmetros, 6,86 GiB; 8,3 GiB na VRAM com 32k |
+| **Agente**      | Python 3.12 + SDK `mcp` 2.3.0      | main.py (cliente) + mcp_server.py (stdio)      |
+| **Comandos**    | Git for Windows (`usr\bin`) + System32 | Programas do `run_command`                 |
 
-### Modelo oficial: gemma4:12b (decidido em 27/10/2026)
+### Modelo oficial: gemma4-12b (decidido em 27/10/2026)
 
 O projeto nasceu com o Llama 3.1 8B Instruct Q4_K_M. A troca foi decidida pela bateria
 `evals/prompt_traps.py` (6 casos-armadilha × 3 rodadas, conferindo chamadas e texto):
@@ -61,79 +64,150 @@ O projeto nasceu com o Llama 3.1 8B Instruct Q4_K_M. A troca foi decidida pela b
 | Modelo        | Arquivo | Bateria (caminho MCP) | Observação |
 |---------------|---------|-----------------------|------------|
 | `llama3.1:8b` | 4,6 GB  | 12/18                 | Obedece a instrução escondida em arquivo; às vezes erra nome de arquivo |
-| `gemma4:12b`  | 7,0 GB  | 18/18                 | Ocupa 7,8 GB na VRAM com contexto de 4096 (~8,1 GB com 32k); carrega em ~7 s a frio |
-| `qwen38-27b`  | 12,2 GB | não medido            | Cabe nos 15,8 GiB, mas sobra pouco para o contexto |
+| `gemma4:12b`  | 7,0 GB  | 18/18                 | O único sem falha, inclusive no caso de injeção |
 
-O gemma4:12b foi o único sem falha, inclusive no caso de injeção (instrução escondida num
-arquivo), em que o llama3.1:8b caiu nas 3 rodadas. O custo é mais VRAM (7,8 GB contra ~5 GB) e
-~7 s para carregar a frio, que o `main.py` esconde aquecendo o modelo na subida.
-No código, o modelo oficial fica em `OFFICIAL_MODEL` (`agent/ollama_client.py`): o `main.py` o marca
-como "(oficial)" e o escolhe com Enter, e a bateria o usa como padrão.
+Os números acima são da época do Ollama. Na Fase 7 o mesmo GGUF passou a ser servido pelo llama.cpp
+(ver abaixo). No código, o modelo oficial fica em `OFFICIAL_MODEL` (`agent/llama_server.py`): é o nome
+do arquivo em `C:\Users\plepl\llm\models\` sem o `.gguf`. O `main.py` o marca como "(oficial)" e o
+escolhe com Enter, e a bateria o usa como padrão.
 
 ---
 
 ## Como rodar
 
-Tudo no terminal do WSL, na raiz do projeto (`/mnt/c/Users/plepl/Downloads/01-Trabalho/LLMs`).
+No PowerShell, na raiz do projeto.
 
-```bash
-# 1. Ambiente Python (uma vez). Fica no disco Linux: em /mnt/c, o protocolo 9P deixa
-#    os imports do SDK do MCP ~5x mais lentos (4,3 s contra 0,85 s).
-python3 -m venv ~/.venvs/llm-local
-~/.venvs/llm-local/bin/pip install -r requirements.txt
+```powershell
+# 1. Ambiente Python (uma vez)
+py -3.12 -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
 
-# 2. Ollama (uma vez). Depois disso ele sobe sozinho a cada boot da VM do WSL,
-#    e a VM fica ligada sem terminal aberto (ver "Fase 6" em Decisões de design).
-bash docker/check-host.sh         # pré-requisitos do host: o compose não instala nada
-docker compose -f docker/docker-compose.yml up -d
-curl http://localhost:11434/      # "Ollama is running" (também do Windows)
+# 2. Agente (sobe e encerra o llama-server sozinho)
+.venv\Scripts\python agent\main.py
 
-# 3. Agente
-~/.venvs/llm-local/bin/python agent/main.py
+# Checagens manuais
+.venv\Scripts\python agent\test_connection.py     # modelo: sobe, responde "ok", encerra
+.venv\Scripts\python agent\test_mcp_client.py     # ferramentas e cerca, sem modelo
 
-# Bateria do prompt (um modelo por vez na GPU)
-~/.venvs/llm-local/bin/python evals/prompt_traps.py gemma4:12b 3
+# Bateria do prompt (sobe o próprio llama-server; não rode com o agente aberto)
+.venv\Scripts\python evals\prompt_traps.py gemma4-12b 3
 ```
 
-O código está versionado em https://github.com/pedro470/llm-local-agent (privado).
+Pré-requisitos fora do repositório:
+
+| Item | Onde | Observação |
+|---|---|---|
+| Builds do llama.cpp | `C:\Users\plepl\llm\llama.cpp\{rocm,vulkan}\` | Releases oficiais do llama.cpp para Windows |
+| Modelos GGUF | `C:\Users\plepl\llm\models\*.gguf` | Um arquivo por modelo; o nome vira a opção do menu |
+| HIP SDK 7.2 | `C:\Program Files\AMD\ROCm\7.2\` | Só para o backend ROCm; instala sem trocar o Adrenalin |
+| Git for Windows | `C:\Program Files\Git\usr\bin\` | Os programas GNU do `run_command` |
+
+Variáveis de ambiente (todas opcionais):
+
+| Variável | Padrão | Para quê |
+|---|---|---|
+| `AGENT_BACKEND` | `vulkan` | `vulkan` ou `rocm` |
+| `AGENT_NUM_CTX` | `32768` | Janela de contexto do llama-server |
+| `AGENT_PORT` | `8080` | Porta do llama-server (sempre no loopback) |
+| `AGENT_WRITE_ROOTS` | `<projeto>\teste_sandbox` | Raízes de escrita, separadas por `;` |
+| `LLM_HOME` | `C:\Users\plepl\llm` | Onde ficam `llama.cpp\` e `models\` |
+| `HIP_PATH` | `C:\Program Files\AMD\ROCm\7.2` | HIP SDK (backend ROCm) |
+
+O código está versionado em https://github.com/pedro470/llm-local-agent (privado). O setup antigo
+(WSL2 + Docker + Ollama, Fases 1 a 6) fica no histórico do git, no commit `76a8228`.
 
 ---
 
 ## Decisões de design
 
+### Fase 7: llama.cpp nativo no Windows (05/11/2026)
+Com o agente pronto, a pilha WSL2 → Docker → Ollama virou peso morto: três camadas de virtualização
+entre o Python e a GPU, que existiam porque o ROCm era só Linux. O llama.cpp tem builds Windows
+oficiais com ROCm e Vulkan, e o `llama-server` dele é o mesmo motor que o Ollama embute.
+
+O que mudou, camada por camada:
+
+| Antes (Fases 1-6) | Agora (Fase 7) | Por quê |
+|---|---|---|
+| Ollama em container, `restart: unless-stopped` | `llama-server.exe` filho do `main.py` | Um servidor = um modelo; sai o agente, sai a VRAM |
+| GPU-PV: `/dev/dxg` + `libdxcore` + `librocdxg` | Driver Adrenalin direto (WDDM) | Sem a ponte, a geração ficou ~12% mais rápida (bench abaixo) |
+| `/api/chat` do Ollama | `/v1/chat/completions` (OpenAI) | Formato padrão; `reasoning_content` no lugar de `thinking` |
+| `num_ctx` por pedido | `-c 32768 -np 1` na subida | O KV é alocado uma vez; um slot só, com a janela inteira |
+| `/api/ps` para a VRAM | Contador `GPU Process Memory` do Windows | O WDDM mede a VRAM por processo, driver incluso |
+| `ls`, `ps`, `free`... do Ubuntu | GNU do Git + `tasklist`, `systeminfo` | Mesma lista, caminhos absolutos, sem shell |
+| venv em `~/.venvs` (fora do 9P) | `.venv` no projeto | Sem 9P, o NTFS não penaliza mais os imports |
+
+**Ciclo de vida do servidor.** O `main.py` cria o `llama-server.exe` e o põe num **Job Object** com
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Um Job Object é um grupo de processos gerido pelo kernel: quando o
+último handle dele fecha, e o único handle é do Python, o kernel mata os membros. Então, se o Python
+morrer de qualquer jeito (Ctrl+C, janela fechada, crash), o servidor morre junto e não fica um órfão
+segurando ~8 GB de VRAM e a porta 8080. O SDK do MCP faz o mesmo com o `mcp_server.py`.
+`CREATE_NEW_PROCESS_GROUP` faz o Ctrl+C ir só para o Python, que encerra o servidor na ordem certa.
+
+**Backend: ROCm ou Vulkan.** É a física das duas fases da inferência:
+- *Prefill* (o prompt inteiro de uma vez) é produto matriz × matriz, limitado por **computação**. O ROCm
+  usa as GEMMs afinadas da AMD (hipBLASLt/rocBLAS) e ganha: +32% com contexto vazio, +62% em 8k.
+- *Geração* (um token por vez) é matriz × vetor, limitada por **banda de memória**: cada token lê os
+  6,86 GiB de pesos. Com ~640 GB/s, o teto é ~87 t/s. O Vulkan chega a 78% dele (68,3 t/s), o ROCm a
+  71% (61,9): o HIP no Windows paga mais por lançamento de kernel, e os shaders do Vulkan fundem mais
+  operações por envio.
+- Com `p` tokens novos de prefill e `g` tokens gerados por chamada, em 8k o Vulkan só ganha se
+  `g/p > 0,37`. A estimativa inicial (ler ~600 tokens de ferramenta, gerar ~150: `g/p ≈ 0,25`) dava o
+  ROCm, e errou o `g`: o gemma4 pensa de 100 a 300 tokens por chamada e, com o cache do prefixo no
+  slot, os tokens novos de prefill são poucos. A geração domina.
+- Medido na bateria completa (9 casos × 3 rodadas, 27/27 nos dois): ROCm 224, 246 e 228 s (média 233);
+  Vulkan 222 e 197 s (média 210). ~10% a favor do Vulkan, da ordem da variação entre rodadas.
+- O ROCm continua melhor quando o cache se perde: quando a janela corta o histórico, o prefill de
+  ~28k tokens leva ~16 s no ROCm contra ~28 s no Vulkan.
+- **Decisão (05/11/2026): Vulkan é o padrão.** Mais rápido na carga real do agente e sem depender do
+  HIP SDK (o driver Vulkan vem com o Adrenalin). O build ROCm fica instalado: `AGENT_BACKEND=rocm`.
+
+| Bench `llama-bench`, gemma4 Q4_K_M, `-ngl 99 -fa 1` | pp512 | pp2048 | tg128 | pp512 @8k | tg128 @8k |
+|---|---|---|---|---|---|
+| Windows ROCm (HIP SDK 7.2) | 2720 | 2589 | 61,9 | 1796 | 57,8 |
+| Windows Vulkan | 2066 | 1912 | 68,3 | 1108 | 61,1 |
+| WSL, container `ollama:rocm` (Fases 3-6) | 2520 | 2536 | 54,2 | 1770 | 51,7 |
+
+O Vulkan nesta máquina precisa de `VK_LOADER_LAYERS_DISABLE=VK_LAYER_Twitch_Overlay`: a camada
+implícita do Twitch Studio derruba o `vkCreateDevice` com `ErrorDeviceLost`. O `llama_server.py` define
+a variável sozinho.
+
+**Bug achado na migração.** O SDK do MCP só repassa ao processo do servidor uma lista fixa de
+variáveis de ambiente (`PATH`, `HOME`/`USERPROFILE`...). O `AGENT_WRITE_ROOTS` nunca chegava ao
+`guard.py`, nem no Linux: a cerca sempre usava o padrão `teste_sandbox`. Errava para o lado seguro,
+mas a configuração documentada não funcionava. Agora o `main.py` repassa as `AGENT_*` à mão.
+
 ### Tamanho do modelo
 - O limite é o tamanho em GB, não o número de parâmetros: arquivo do modelo + KV cache precisam
-  caber nos ~14,7 GiB livres da 9070 XT. Se não couberem, parte das camadas vai para a RAM e a
+  caber na VRAM livre da 9070 XT. Se não couberem, parte das camadas vai para a RAM e a
   velocidade despenca.
-- Medido na Fase 3: llama3.1:8b a 84,45 tokens/s de geração, 100% na VRAM.
 - O 8B foi a aposta inicial ("com bom prompting é suficiente"), mas a bateria de armadilhas mostrou
-  limites dele em segurança e fidelidade; o oficial passou a ser o gemma4:12b (ver acima).
+  limites dele em segurança e fidelidade; o oficial passou a ser o gemma4 12B (ver acima).
 
 ### Por que quantização Q4_K_M?
-- Ocupa ~4.9GB (vs ~16GB em FP16)
+- 6,86 GiB contra ~24 GB em FP16
 - Perda de qualidade mínima para tarefas de tool-use
 - Cabe 100% na VRAM com sobra para contexto
 
-### Contexto e VRAM (etapa 5, medido em 28/10/2026)
-- O agente pede `num_ctx = 32768` (`NUM_CTX` em `agent/ollama_client.py`, trocar com `AGENT_NUM_CTX`).
-  O padrão do Ollama é 4096, e o prompt de sistema mais o schema das 7 ferramentas já gastam 1.656.
-- KV cache do gemma4:12b: ~8,5 KiB por token. Só 8 das 48 camadas têm atenção global (cache que
-  cresce com o contexto); as outras 40 usam janela deslizante de 1024 tokens, com cache fixo de ~255 MiB.
-  Com 32k: 7,0 GB de pesos + 272 MiB de KV global + 255 MiB de KV deslizante + ~250 MiB de buffers.
-- O aquecimento usa o mesmo `num_ctx` do chat: o KV cache é alocado no carregamento, e um valor
-  diferente obriga o Ollama a recarregar o modelo.
-- Se o prompt passa do `num_ctx`, o Ollama descarta mensagens antigas sem avisar (2.298 tokens viraram
-  1.903 com `num_ctx=2048`, sem erro). Por isso o `main.py` tem a própria janela (`trim_history`):
-  corta pedidos inteiros, mais antigos primeiro, antes de cada chamada, e mantém o prompt de sistema
-  e o pedido atual. Depois do corte, uma nota no prompt de sistema avisa o modelo; sem a frase
-  "o primeiro pedido que você ainda vê NÃO é o primeiro", ele ignorava a nota em 4 de 5 rodadas.
-- Medidor: `prompt_eval_count` do Ollama conta o prompt inteiro, mesmo o trecho que veio do cache.
-  O `main.py` mostra o uso depois de cada resposta e, na subida, o que o `/api/ps` diz da VRAM.
-- O raciocínio do gemma4 (campo `thinking`) fica no histórico só durante a rodada em andamento.
-  No meio de uma cadeia de ferramentas o template o reenvia (52 tokens sem, 299 com): é o plano do
-  modelo. Com a rodada encerrada, o template o descarta, e o `chat_turn` o apaga quando chega pedido
-  novo. A versão da etapa 5 apagava cedo demais, e o modelo criava a pasta, esquecia que faltava
-  mover e dizia "movi" (3 de 10 vezes; 15 de 15 certas depois da correção).
+### Contexto e VRAM (etapa 5; números do llama.cpp de 05/11/2026)
+- O servidor sobe com `-c 32768` (`NUM_CTX` em `agent/llama_server.py`, trocar com `AGENT_NUM_CTX`).
+  O prompt de sistema mais o schema das 8 ferramentas gastam ~1.700 tokens.
+- VRAM medida pelo contador do Windows: **8,26 GiB** = pesos 6,86 + KV 0,97 + compute 0,15 + driver.
+  O KV tem duas partes: as 8 camadas de atenção global (512 MiB, crescem com o contexto) e as 40 de
+  janela deslizante de 1024 tokens (480 MiB, fixas). A tabela de embeddings (787 MiB, vocabulário de
+  262k) fica na RAM, mapeada do arquivo: só é lida uma linha por token.
+- Se o prompt passa da janela, o llama-server recusa o pedido (o Ollama descartava mensagens antigas
+  sem avisar). Por isso o `main.py` tem a própria janela (`trim_history`): corta pedidos inteiros,
+  mais antigos primeiro, antes de cada chamada, e mantém o prompt de sistema e o pedido atual.
+  Depois do corte, uma nota no prompt de sistema avisa o modelo; sem a frase "o primeiro pedido que
+  você ainda vê NÃO é o primeiro", ele ignorava a nota em 4 de 5 rodadas.
+- Medidor: `usage.prompt_tokens` conta o prompt inteiro, mesmo o trecho que veio do cache do slot.
+  O `main.py` mostra o uso depois de cada resposta.
+- O raciocínio do gemma4 (`reasoning_content`; `enable_thinking` liga o canal no template) fica no
+  histórico só durante a rodada em andamento. No meio de uma cadeia de ferramentas o template o
+  reenvia (52 tokens sem, 299 com): é o plano do modelo. Com a rodada encerrada, o template o
+  descarta, e o `chat_turn` o apaga quando chega pedido novo. A versão da etapa 5 apagava cedo demais,
+  e o modelo criava a pasta, esquecia que faltava mover e dizia "movi" (3 de 10 vezes).
 
 ### Rotinas: o modelo escolhe, o Python executa (etapa 6)
 - Cada rotina é um YAML em `routines/`. O modelo só escolhe a rotina e os parâmetros (`run_routine`);
@@ -151,76 +225,17 @@ O código está versionado em https://github.com/pedro470/llm-local-agent (priva
 - O catálogo das rotinas vai no prompt de sistema. Com uma ferramenta `list_routines` no meio, o
   modelo consultava, anunciava "vou executar" e parava (organizar 2/3, diagnóstico 1/3); com o
   catálogo no prompt, 5/5 nos dois.
-- As rotinas só leem e organizam: a cerca não deixa o agente iniciar serviços. No troubleshooting,
-  a conclusão diz o comando que o usuário deve rodar (ex.: `docker start ollama`).
-
-### Fase 6: compose e VM sempre ligada (etapa 7, 05/11/2026)
-O `docker run` de uma linha virou `docker/docker-compose.yml`: mesmo container, mesmo nome
-(`ollama`), mesmo volume. A cadeia de início automático tem três elos, e cada um resolve uma coisa:
-
-| Elo | Onde | O que garante |
-|---|---|---|
-| `systemd=true` + `docker.service` habilitado | `/etc/wsl.conf` (já estava) | O dockerd sobe no boot da VM, sem terminal |
-| `restart: unless-stopped` | `docker-compose.yml` | O dockerd religa o container; um `docker stop` manual é respeitado |
-| `[general] instanceIdleTimeout=-1` | `C:\Users\plepl\.wslconfig` | A distro não desliga quando o último `wsl.exe` termina |
-
-O que se aprendeu no caminho:
-- Sem o 3º elo, a distro cai ~15 s depois do último `wsl.exe`, **mesmo com serviços do systemd
-  rodando**: o WSL conta sessões de terminal, não processos. Era a causa do "container caiu" de 26/10.
-- `vmIdleTimeout=-1` (em `[wsl2]`) sozinho não resolve: ele só segura a VM depois que todas as distros
-  pararam, e a distro (onde vive o dockerd) já tinha parado. Teste: VM desligada após 2 min.
-- No WSL 2.6.3, `instanceIdleTimeout` em `[wsl2]` dá "chave desconhecida"; o lugar é `[general]`.
-- Teste final: `wsl --shutdown`, um `wsl.exe -e true` que termina na hora, nenhum terminal aberto;
-  minutos depois o Windows ainda recebe `Ollama is running` em `localhost:11434`.
-- A porta só escuta no loopback (`127.0.0.1:11434`): o Windows chega pelo encaminhamento de
-  localhost do WSL; outra máquina da rede, não. O agente não tem autenticação, então isso importa.
-- O volume é `external: true`: o compose não cria um `llm-local_ollama_data` vazio ao lado dos modelos,
-  e um `docker compose down -v` não apaga ~15 GB de download.
-- Custo: a VM fica de pé até `wsl --shutdown` ou o Windows desligar. O modelo só ocupa VRAM enquanto
-  carregado (`keep_alive` de 5 min do Ollama); a RAM ociosa volta pelo `autoMemoryReclaim=gradual`.
-- O que **não** está automatizado: ligar a VM no logon do Windows. Ela sobe no primeiro `wsl.exe`
-  (abrir o terminal, o VS Code etc.) e daí em diante fica.
-
-### O compose descreve o container; o host é com você
-Apagar a imagem não é problema: o `up` baixa `ollama/ollama:rocm` de novo (a tag anda; para a mesma
-versão, fixe pelo digest). Apagar o volume, sim: os modelos estão nele. Já os pré-requisitos do host
-ficam fora do alcance do compose, porque o container usa o kernel e os arquivos do host emprestados:
-
-| Pré-requisito | Onde vive | Quem instala |
-|---|---|---|
-| Driver AMD Adrenalin | Windows | Você |
-| `/dev/dxg` e `libdxcore.so` | Windows → WSL2 | O Windows, junto com o WSL2 |
-| `librocdxg.so` em `/opt/rocm/lib` | Ubuntu | Você (`.deb` `rocdxg-roct`) |
-| Docker Engine, plugin compose, systemd | Ubuntu | Você (Fase 1) |
-| `[general] instanceIdleTimeout=-1` | `.wslconfig` do Windows | Você (Fase 6) |
-
-O ROCm pesado (HIP, rocBLAS) **não** é pré-requisito: vem dentro da imagem (`libdirs=ollama,rocm_v7_2`
-no log). Do host, o container só pega a ponte (`librocdxg.so`, `libdxcore.so`) e o device.
-
-A armadilha: se a `librocdxg.so` faltar no host, o Docker cria uma **pasta vazia** no lugar e monta.
-O container sobe, fica `healthy` e o Ollama roda na CPU sem avisar. `docker/check-host.sh` confere cada
-linha da tabela (exigindo arquivo regular, não só "existe") e, com o container de pé, se o log diz
-`library=ROCm`. Sai com 1 e diz o comando que resolve quando falta algo.
-
-### Por que Docker em vez de instalar tudo direto?
-- Ambiente limpo, reprodutível, descartável
-- Se quebrar, destrói o container e recria — sem sujar o sistema
-- Separa o "mundo Linux + ROCm" do seu Windows
-
-### Por que Ollama e não PyTorch direto?
-- Ollama abstrai toda a complexidade de carregar modelos GGUF
-- API REST simples para o agente se conectar
-- Gerencia modelos (download, remoção, atualização) com um único comando
-- PyTorch seria necessário se você fosse TREINAR; para INFERÊNCIA, é overkill
+- As rotinas só leem e organizam: a cerca não deixa o agente encerrar processos. No troubleshooting,
+  a conclusão diz o comando que o usuário deve rodar (ex.: `taskkill /PID <pid>` para um llama-server órfão).
 
 ### Por que o agente é cliente de um servidor MCP
 - Uma implementação só das ferramentas (o antigo `tools.py` duplicava o servidor e divergia dele)
 - O servidor valida os argumentos pelo schema: tipo errado vindo do modelo é convertido ou recusado
 - Qualquer outro cliente MCP pode usar as mesmas ferramentas com as mesmas travas
 
-### Por que a confirmação humana é por elicitation, e não por /dev/tty
-- O SDK cria o servidor com `start_new_session=True`: o processo filho não tem terminal de
-  controle, então `open("/dev/tty")` falha sempre e toda ação ficava bloqueada, mesmo com "s"
+### Por que a confirmação humana é por elicitation
+- O SDK cria o servidor sem console próprio (`CREATE_NO_WINDOW`; no Linux era `start_new_session`),
+  e o stdin dele é o canal JSON-RPC: o servidor não tem como perguntar nada direto a você
 - A elicitation é o mecanismo do próprio protocolo: o servidor pede, o cliente pergunta ao humano
 - Fail-closed: cliente sem elicitation, recusa, cancelamento ou erro bloqueiam a ação
 
@@ -228,70 +243,30 @@ linha da tabela (exigindo arquivo regular, não só "existe") e, com o container
 - A confirmação só existe em `delete_file` e `run_command`; mover e copiar não perguntam
 - O llama3.1:8b obedece a instruções escondidas em arquivos (teste de injeção da bateria): o prompt
   não protege, a cerca sim
-- `guard.py` resolve cada caminho (segue symlinks, elimina `..`) e exige que caia numa raiz
+- `guard.py` resolve cada caminho (segue symlinks e junctions, elimina `..`) e exige que caia numa raiz
   permitida; `run_command` aceita 18 programas de leitura, executados sem shell
+- Cada programa aponta para um `.exe` com caminho absoluto. O `CreateProcess` do Windows procura um
+  programa sem caminho também na pasta atual: um `ls.exe` plantado no projeto seria executado
+- Caminhos no estilo do Git (`/c/Windows`) resolvem, no Python, para `C:\c\Windows`: fora das raízes,
+  recusados. Opções com valor colado (`--file=C:/x`) têm o valor conferido
+- A saída dos programas do Git é UTF-8; a dos do Windows (`tasklist`, `systeminfo`) vem na code page
+  OEM do console (cp850 em pt-BR), e o servidor decodifica cada uma do jeito certo
 - A recusa vem antes da pergunta: quando o (s/n) aparece, a ação já é permitida
-
-### Por que o ambiente Python fica fora do projeto
-- `/mnt/c` é o NTFS do Windows exposto por 9P: cada abertura de arquivo atravessa a VM
-- O SDK do MCP abre centenas de arquivos no import: 4,3 s em `/mnt/c` contra 0,85 s no disco Linux
-- O `requirements.txt` recria o ambiente idêntico em segundos (`pip freeze` conferido)
-
----
-
-## Mapa Mental de Baixo Nível: Paravirtualização, Paths e Binds
-
-Consulte esta matriz para relacionar o conceito de sistemas com o caminho exato do arquivo:
-
-| Camada / Função | Origem no Host (WSL2) | Quem colocou lá? | Mapeamento no Docker | Por que precisa disso? |
-|---|---|---|---|---|
-| **Canal de Kernel (I/O)** | `/dev/dxg` | Kernel WSL2 (VMBus) | `--device=/dev/dxg` | Abre permissão no cgroup para o container falar com a Root Partition (Windows) |
-| **API DXCore (Microsoft)** | `/usr/lib/wsl/lib/libdxcore.so` | Windows Host (`System32\lxss\lib`) | `-v ...:/usr/lib/libdxcore.so` | Biblioteca de usuário da MS que empacota chamadas para o `/dev/dxg` |
-| **Ponte AMD ROCDXG** | `/opt/rocm/lib/librocdxg.so` | Pacote AMD (`rocdxg-roct.deb`) | `-v ...:/usr/lib/librocdxg.so` | Intercepta chamadas ROCm e traduz para chamadas da `libdxcore.so` |
-| **Ponte AMD (RPATH fixo)** | `/opt/rocm/lib/librocdxg.so` | Pacote AMD (`rocdxg-roct.deb`) | `-v ...:/opt/rocm/lib/librocdxg.so` | Atende binários compilados com busca de runtime restrita a `/opt/rocm/lib` |
-| **Flag de Hardware** | `HSA_ENABLE_DXG_DETECTION=1` | Usuário / Ambiente | `-e HSA_ENABLE_DXG_DETECTION=1` | Força o ROCm a inicializar o backend DXG em vez de falhar procurando `/dev/kfd` |
-| **Persistência de Tensores**| Volume Docker (`ollama_data`) | Docker Engine no WSL2 | `-v nome_vol:/root/.ollama` | Grava modelos no disco real do WSL2, evitando perda ao destruir o container |
-
----
-
-## Estratégia de Investigação (Como encontrar os paths sozinho)
-
-Se você esquecer de onde veio um arquivo ou onde ele deve ser montado, não copie e cole da internet. Use as ferramentas do próprio Linux para rastrear:
-
-### 1. Rastrear arquivos instalados por um pacote
-**Comando:** `dpkg -L <nome_do_pacote>` (ex: `dpkg -L rocdxg-roct`)
-- **`dpkg`**: O gerenciador de pacotes de baixo nível do Debian/Ubuntu (o `apt` usa ele por baixo dos panos).
-- **`-L` (List)**: Lista todos os caminhos físicos (arquivos e pastas) que aquele pacote extraiu no seu disco. Use isso logo após instalar um `.deb` para ver exatamente onde a biblioteca caiu (ex: descobrindo o `/opt/rocm/lib/librocdxg.so`).
-
-### 2. Encontrar bibliotecas do cache do sistema
-**Comando:** `ldconfig -p | grep <nome>` (ex: `ldconfig -p | grep dxcore`)
-- **`ldconfig`**: Utilitário que constrói e lê o cache do Dynamic Linker (`ld.so`), mapeando onde estão as bibliotecas compartilhadas (`.so`) no sistema.
-- **`-p` (Print cache)**: Pede para imprimir a lista atual de todas as bibliotecas que o Linux sabe encontrar automaticamente (geralmente lendo de `/etc/ld.so.conf.d/`).
-- **`\| grep`**: Filtra a saída. Útil para rastrear as bibliotecas injetadas pelo Windows (como a `libdxcore.so`), que o pacote `dpkg` não gerencia.
-
-### 3. Abrir o capô de um executável para ver o que ele procura
-**Comando:** `readelf -d /caminho/do/binario | grep -E "NEEDED|RPATH"` (ex: lendo o binário do `ollama` ou `llama-server`)
-- **`readelf`**: Ferramenta que lê os metadados de arquivos binários padrão do Linux (formato ELF).
-- **`-d` (Dynamic)**: Exibe as seções do cabeçalho relativas à linkagem dinâmica (tudo que o programa precisa carregar em tempo de execução para não dar "Segmentation Fault" ou "cannot open shared object file").
-- **`NEEDED`**: Lista o nome exato das bibliotecas `.so` que o binário quer.
-- **`RPATH / RUNPATH`**: Mostra se quem compilou o programa "cravou" no código um diretório absoluto (ex: `/opt/rocm/lib`) onde o sistema deve procurar as dependências antes de olhar os diretórios padrão. É por isso que montamos volumes no Docker espelhando essa estrutura exata.
 
 ---
 
 ## Estimativa de armazenamento
 
-| Item                                  | Tamanho aprox. |
-|---------------------------------------|---------------|
-| Imagem base Ubuntu (WSL2)             | ~2 GB         |
-| Docker Engine + overhead              | ~3 GB         |
-| Imagem Docker com ROCm + Ollama       | ~15-25 GB     |
-| Modelos baixados hoje (2, no volume `ollama_data`) | ~15 GB |
-| Python + dependências do agente       | ~0,1 GB       |
-| **Total estimado**                    | **~35-45 GB** |
+| Item                                        | Tamanho aprox. |
+|---------------------------------------------|---------------|
+| Builds do llama.cpp (ROCm + Vulkan)         | ~1 GB         |
+| HIP SDK 7.2                                 | ~3 GB         |
+| Modelos (`gemma4-12b`, `gemma4-12b-heretic`) | ~14 GB       |
+| Python + dependências do agente             | ~0,1 GB       |
+| **Total estimado**                          | **~18 GB**    |
 
-> Os modelos são o que mais cresce. Em 05/11/2026 o volume tem gemma4:12b (7,6 GB) e uma variante
-> do gemma 12B QAT (7,0 GB); llama3.1:8b e qwen38-27b já saíram. `docker exec ollama ollama rm <modelo>`
-> libera espaço.
+> Antes, com a distro do WSL, a imagem `ollama:rocm` e o volume, eram ~25 GB só dentro do disco
+> virtual do WSL, mais o HIP SDK no Windows para os benchmarks.
 
 ---
 
@@ -304,12 +279,10 @@ Se você esquecer de onde veio um arquivo ou onde ele deve ser montado, não cop
 
 ---
 
-## Referências obrigatórias
+## Referências
 
-Antes de começar, você vai **ler** (não apenas abrir) estas páginas:
-
-- [O que é Docker? (docs oficiais)](https://docs.docker.com/get-started/docker-overview/)
-- [O que é WSL2? (Microsoft)](https://learn.microsoft.com/pt-br/windows/wsl/about)
-- [O que é ROCm? (AMD)](https://rocm.docs.amd.com/en/latest/about/what-is-rocm.html)
-- [Ollama — GitHub](https://github.com/ollama/ollama)
-- [ROCm 10.0.0 — Matriz de compatibilidade](https://rocm.docs.amd.com/en/latest/compatibility/compatibility-matrix.html)
+- [llama.cpp — GitHub](https://github.com/ggml-org/llama.cpp) (releases com builds Windows ROCm e Vulkan)
+- [llama-server — README](https://github.com/ggml-org/llama.cpp/tree/master/tools/server)
+- [HIP SDK para Windows (AMD)](https://rocm.docs.amd.com/projects/install-on-windows/en/latest/)
+- [Job Objects (Microsoft)](https://learn.microsoft.com/pt-br/windows/win32/procthread/job-objects)
+- [ROCm — Matriz de compatibilidade](https://rocm.docs.amd.com/en/latest/compatibility/compatibility-matrix.html)
