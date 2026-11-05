@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "delegar": {
+      "command": "C:\\Users\\plepl\\Downloads\\01-Trabalho\\LLMs\\.venv\\Scripts\\python.exe",
+      "args": [
+        "C:\\Users\\plepl\\Downloads\\01-Trabalho\\LLMs\\tools\\delegar_mcp.py"
+      ]
+    }
+  }
+}
