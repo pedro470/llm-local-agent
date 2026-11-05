@@ -61,6 +61,8 @@ A partir da Fase 5, o formato de atuação é de **Pair Programming Ativo**:
 - `teste_sandbox/` — Única raiz de escrita padrão (fora do git)
 - `routines/` — Rotinas YAML: `organizar-por-tipo`, `diagnostico-agente`
 - `docker/docker-compose.yml` — Ollama com a GPU (`/dev/dxg` + ROCDXG), volume `ollama_data` externo, porta só no loopback
+- `docker/check-host.sh` — Confere os pré-requisitos do host antes do `up` (o compose não instala nada);
+  `.gitattributes` mantém os `.sh` em LF
 
 ## Progresso Atual
 

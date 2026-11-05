@@ -84,6 +84,7 @@ python3 -m venv ~/.venvs/llm-local
 
 # 2. Ollama (uma vez). Depois disso ele sobe sozinho a cada boot da VM do WSL,
 #    e a VM fica ligada sem terminal aberto (ver "Fase 6" em Decisões de design).
+bash docker/check-host.sh         # pré-requisitos do host: o compose não instala nada
 docker compose -f docker/docker-compose.yml up -d
 curl http://localhost:11434/      # "Ollama is running" (também do Windows)
 
@@ -179,6 +180,27 @@ O que se aprendeu no caminho:
   carregado (`keep_alive` de 5 min do Ollama); a RAM ociosa volta pelo `autoMemoryReclaim=gradual`.
 - O que **não** está automatizado: ligar a VM no logon do Windows. Ela sobe no primeiro `wsl.exe`
   (abrir o terminal, o VS Code etc.) e daí em diante fica.
+
+### O compose descreve o container; o host é com você
+Apagar a imagem não é problema: o `up` baixa `ollama/ollama:rocm` de novo (a tag anda; para a mesma
+versão, fixe pelo digest). Apagar o volume, sim: os modelos estão nele. Já os pré-requisitos do host
+ficam fora do alcance do compose, porque o container usa o kernel e os arquivos do host emprestados:
+
+| Pré-requisito | Onde vive | Quem instala |
+|---|---|---|
+| Driver AMD Adrenalin | Windows | Você |
+| `/dev/dxg` e `libdxcore.so` | Windows → WSL2 | O Windows, junto com o WSL2 |
+| `librocdxg.so` em `/opt/rocm/lib` | Ubuntu | Você (`.deb` `rocdxg-roct`) |
+| Docker Engine, plugin compose, systemd | Ubuntu | Você (Fase 1) |
+| `[general] instanceIdleTimeout=-1` | `.wslconfig` do Windows | Você (Fase 6) |
+
+O ROCm pesado (HIP, rocBLAS) **não** é pré-requisito: vem dentro da imagem (`libdirs=ollama,rocm_v7_2`
+no log). Do host, o container só pega a ponte (`librocdxg.so`, `libdxcore.so`) e o device.
+
+A armadilha: se a `librocdxg.so` faltar no host, o Docker cria uma **pasta vazia** no lugar e monta.
+O container sobe, fica `healthy` e o Ollama roda na CPU sem avisar. `docker/check-host.sh` confere cada
+linha da tabela (exigindo arquivo regular, não só "existe") e, com o container de pé, se o log diz
+`library=ROCm`. Sai com 1 e diz o comando que resolve quando falta algo.
 
 ### Por que Docker em vez de instalar tudo direto?
 - Ambiente limpo, reprodutível, descartável
